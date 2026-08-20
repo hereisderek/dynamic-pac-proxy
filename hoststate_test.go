@@ -43,3 +43,37 @@ func TestLazyHealthCheckTTL(t *testing.T) {
 		t.Fatalf("call after TTL expiry returned too fast (%s), expected a fresh mDNS attempt taking >= %s", staleElapsed, eff.MDNSTimeout)
 	}
 }
+
+// TestReportFailureCooldown verifies reportFailure invalidates the cache
+// immediately on the first call, but is a no-op (doesn't re-invalidate,
+// doesn't reset the cooldown clock) for repeated calls within the cooldown
+// window — only the first failure in a burst should force an early recheck.
+func TestReportFailureCooldown(t *testing.T) {
+	hs := newHostState()
+	cooldown := 200 * time.Millisecond
+
+	hs.mu.Lock()
+	hs.snap = hostSnapshot{reachable: true, lastCheck: time.Now()}
+	hs.mu.Unlock()
+
+	if ok := hs.reportFailure(cooldown); !ok {
+		t.Fatal("first reportFailure should invalidate the cache")
+	}
+	if !hs.peek().lastCheck.IsZero() {
+		t.Fatal("expected lastCheck to be zeroed after invalidation")
+	}
+
+	if ok := hs.reportFailure(cooldown); ok {
+		t.Fatal("second reportFailure within the cooldown window should be a no-op")
+	}
+
+	time.Sleep(cooldown + 50*time.Millisecond)
+
+	hs.mu.Lock()
+	hs.snap = hostSnapshot{reachable: true, lastCheck: time.Now()}
+	hs.mu.Unlock()
+
+	if ok := hs.reportFailure(cooldown); !ok {
+		t.Fatal("reportFailure after the cooldown window elapsed should invalidate again")
+	}
+}

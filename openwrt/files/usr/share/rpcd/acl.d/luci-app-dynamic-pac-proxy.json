@@ -1,0 +1,17 @@
+{
+	"luci-app-dynamic-pac-proxy": {
+		"description": "Grant access to the Dynamic PAC Proxy LuCI app",
+		"read": {
+			"uci": ["dynamic-pac-proxy"],
+			"file": {
+				"/etc/init.d/dynamic-pac-proxy": ["exec"]
+			}
+		},
+		"write": {
+			"uci": ["dynamic-pac-proxy"],
+			"file": {
+				"/etc/init.d/dynamic-pac-proxy": ["exec"]
+			}
+		}
+	}
+}

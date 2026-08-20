@@ -1,0 +1,34 @@
+{
+	"admin/services/dynamic-pac-proxy": {
+		"title": "Dynamic PAC Proxy",
+		"order": 50,
+		"action": {
+			"type": "firstchild"
+		},
+		"depends": {
+			"acl": ["luci-app-dynamic-pac-proxy"]
+		}
+	},
+	"admin/services/dynamic-pac-proxy/overview": {
+		"title": "Overview",
+		"order": 10,
+		"action": {
+			"type": "cbi",
+			"path": "dynamic-pac-proxy/overview"
+		},
+		"depends": {
+			"acl": ["luci-app-dynamic-pac-proxy"]
+		}
+	},
+	"admin/services/dynamic-pac-proxy/hosts": {
+		"title": "Hosts",
+		"order": 20,
+		"action": {
+			"type": "cbi",
+			"path": "dynamic-pac-proxy/hosts"
+		},
+		"depends": {
+			"acl": ["luci-app-dynamic-pac-proxy"]
+		}
+	}
+}

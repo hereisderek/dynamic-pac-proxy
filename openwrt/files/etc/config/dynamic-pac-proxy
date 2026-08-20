@@ -1,0 +1,15 @@
+
+config main 'main'
+	option enabled '1'
+	option listen_addr ':8080'
+	option advertise_host ''
+	option refresh_interval '15s'
+	option mdns_timeout '2s'
+	option dial_timeout '1s'
+	option failure_cooldown '5s'
+
+config host
+	option name 'derek-macbook'
+	option mdns_hostname 'dereks-MacBook-Pro.local'
+	option port '8888'
+	option listen_port '8081'

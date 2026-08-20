@@ -44,16 +44,25 @@ for why it's shaped this way.
     (`checkHost()`) when the cached result is older than that host's
     `refresh_interval`; concurrent callers on a stale cache are coalesced
     onto one check via `checkMu`, not one each. There is deliberately no
-    background polling ticker per host.
+    background polling ticker per host. `reportFailure()` is the other way
+    a check gets triggered early: when a request actually fails on the
+    chained path, it invalidates the cache (zeroes `lastCheck`) so the next
+    request re-checks immediately instead of waiting out the rest of
+    `refresh_interval` — rate-limited by `failure_cooldown` so a burst of
+    failing requests forces one recheck, not one per request.
   - `hostManager`: owns one `net.Listener` + `http.Server` per configured
     host; `reconcile()` starts/stops/rebinds them as the config changes.
-- **`forwardproxy.go`** — the actual proxying. `newHostProxyHandler`
-  builds an `httputil.ReverseProxy` whose `Transport.Proxy` func decides,
-  per request, whether to chain through Charles or go direct, based on the
-  live health cache. `handleConnect` implements HTTPS tunneling by
-  hijacking the client connection and splicing it to an upstream tunnel —
-  chained through Charles via our own CONNECT (`chainedConnect`) if
-  reachable, or dialed straight to the target otherwise.
+- **`forwardproxy.go`** — the actual proxying. The chain-or-direct decision
+  is made once per request (not inside `Transport.Proxy`) and threaded
+  through the request context as an `upstreamDecision`, specifically so
+  `ErrorHandler` can tell whether a failure happened on the chained path
+  (→ call `reportFailure`) or the direct path (→ leave the cache alone,
+  since that failure has nothing to do with Charles). `handleConnect`
+  implements HTTPS tunneling by hijacking the client connection and
+  splicing it to an upstream tunnel — chained through Charles via our own
+  CONNECT (`chainedConnect`) if reachable, or dialed straight to the target
+  otherwise; a failed chained attempt calls `reportUpstreamFailure` before
+  falling back.
 - **`mdns.go`** — `ResolveA` is a from-scratch mDNS (RFC 6762) A-record
   resolver over raw multicast UDP (`golang.org/x/net/dns/dnsmessage`), not
   a shell-out to `avahi-resolve` — deliberate, so it works on a minimal
@@ -68,7 +77,16 @@ for why it's shaped this way.
   *actual* running binary's path and the resolved config path, and seeds a
   config file from the embedded `deploy/config.yaml` (`go:embed`) if none
   exists yet. It does not (yet) recognize OpenWRT's `procd` — that's set
-  up manually, see README.
+  up manually, see README, or via the `openwrt/` package below.
+- **`openwrt/`** — a self-contained OpenWRT package (UCI config + LuCI app
+  + `.ipk`/SSH installer scripts), deliberately kept out of the main Go
+  tree. It never touches this daemon's code: a shell script
+  (`uci2yaml.sh`) translates `/etc/config/dynamic-pac-proxy` (UCI) into
+  the same `config.yaml` the daemon already reads, leaning on the
+  existing hot-reload so most LuCI edits apply live without a restart.
+  Not yet tested against a real router/LuCI — see `openwrt/README.md`'s
+  "What's verified, what isn't" section before assuming it's fully
+  working.
 
 ### Why the architecture looks like this
 

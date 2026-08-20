@@ -48,8 +48,9 @@ func checkHost(eff effectiveHost) hostSnapshot {
 type hostState struct {
 	checkMu sync.Mutex
 
-	mu   sync.RWMutex
-	snap hostSnapshot
+	mu                 sync.RWMutex
+	snap               hostSnapshot
+	lastFailureRecheck time.Time
 }
 
 func newHostState() *hostState { return &hostState{} }
@@ -78,6 +79,24 @@ func (h *hostState) getFresh(eff effectiveHost) hostSnapshot {
 	h.snap = fresh
 	h.mu.Unlock()
 	return fresh
+}
+
+// reportFailure invalidates the cache after a live request actually failed
+// to reach this host despite the cache saying it was reachable, so the
+// next getFresh call re-checks immediately instead of waiting out the rest
+// of refresh_interval. Rate-limited by cooldown: a burst of requests all
+// failing in the same window only forces one early recheck, not one each.
+// Returns true if it invalidated, false if it was a no-op (still cooling
+// down from a previous invalidation).
+func (h *hostState) reportFailure(cooldown time.Duration) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if !h.lastFailureRecheck.IsZero() && time.Since(h.lastFailureRecheck) < cooldown {
+		return false
+	}
+	h.lastFailureRecheck = time.Now()
+	h.snap.lastCheck = time.Time{}
+	return true
 }
 
 func (h *hostState) peek() hostSnapshot {

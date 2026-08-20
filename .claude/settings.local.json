@@ -12,7 +12,27 @@
       "Bash(go test *)",
       "Bash(pkill -f dynamic-pac-proxy)",
       "Bash(cd *)",
-      "Bash(curl *)"
+      "Bash(curl *)",
+      "Bash(pkill -f \"dpp$\")",
+      "Bash(export FAKE_FUNCTIONS=\"$SCRATCH/fake-functions.sh\")",
+      "Bash(export CONFIG_SECTIONS=\"main1 host1 host2\")",
+      "Bash(export cfg_main1_TYPE=main)",
+      "Bash(export cfg_main1_listen_addr=\":8080\")",
+      "Bash(export cfg_main1_advertise_host=\"172.16.2.22\")",
+      "Bash(sh -n /Volumes/private/workspace/myprojects/dynamic-pac-proxy/openwrt/files/etc/init.d/dynamic-pac-proxy)",
+      "Bash(dash -n /Volumes/private/workspace/myprojects/dynamic-pac-proxy/openwrt/files/etc/init.d/dynamic-pac-proxy)",
+      "Bash(luac -p /Volumes/private/workspace/myprojects/dynamic-pac-proxy/openwrt/files/usr/lib/lua/luci/controller/dynamic-pac-proxy.lua)",
+      "Bash(luac -p /Volumes/private/workspace/myprojects/dynamic-pac-proxy/openwrt/files/usr/lib/lua/luci/model/cbi/dynamic-pac-proxy/overview.lua)",
+      "Bash(luac -p /Volumes/private/workspace/myprojects/dynamic-pac-proxy/openwrt/files/usr/lib/lua/luci/model/cbi/dynamic-pac-proxy/hosts.lua)",
+      "Bash(chmod +x /Volumes/private/workspace/myprojects/dynamic-pac-proxy/openwrt/scripts/build-ipk.sh)",
+      "Bash(bash -n /Volumes/private/workspace/myprojects/dynamic-pac-proxy/openwrt/scripts/build-ipk.sh)",
+      "Bash(/Volumes/private/workspace/myprojects/dynamic-pac-proxy/openwrt/scripts/build-ipk.sh -h)",
+      "Bash(chmod +x /Volumes/private/workspace/myprojects/dynamic-pac-proxy/openwrt/scripts/install-over-ssh.sh)",
+      "Bash(bash -n /Volumes/private/workspace/myprojects/dynamic-pac-proxy/openwrt/scripts/install-over-ssh.sh)",
+      "Bash(/Volumes/private/workspace/myprojects/dynamic-pac-proxy/openwrt/scripts/install-over-ssh.sh -h)",
+      "Bash(tar czf *)",
+      "Bash(tar tzf *)",
+      "Bash(rm -f /tmp/files-test.tar.gz)"
     ]
   }
 }

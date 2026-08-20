@@ -30,6 +30,14 @@ box, which makes the online/offline call itself, per request, in real time.
   otherwise the cached result is used immediately. Concurrent requests
   arriving right as the cache goes stale are coalesced into a single
   check, not one each.
+- If a request that was sent chained through Charles actually fails to
+  reach it (Charles just went down, mid-`refresh_interval`), the cache is
+  invalidated immediately instead of waiting out the rest of
+  `refresh_interval` — so the next request re-checks right away. This is
+  itself rate-limited by `failure_cooldown`: a burst of requests all
+  failing in the same window forces one early recheck, not one per
+  request. A `DIRECT`-path failure (the real destination being down,
+  unrelated to Charles) never triggers this.
 - A separate poll (every 3s, fixed) checks the config file's mtime and
   hot-reloads it on change, starting/stopping/rebinding each host's
   listener as hosts are added/removed/changed — see "Configuration" below.
@@ -82,6 +90,7 @@ advertise_host: "192.168.1.50"   # this box's LAN IP/hostname, as seen by client
 refresh_interval: 15s
 mdns_timeout: 2s
 dial_timeout: 1s
+failure_cooldown: 5s
 
 hosts:
   - name: derek-macbook
@@ -106,6 +115,7 @@ Top-level fields:
 | `refresh_interval`  | `15s`            | Default health-check cache TTL for hosts that don't override it |
 | `mdns_timeout`      | `2s`             | Default mDNS reply timeout for hosts that don't override |
 | `dial_timeout`      | `1s`             | Default TCP dial timeout for hosts that don't override |
+| `failure_cooldown`  | `5s`             | Default minimum spacing between failure-triggered early rechecks, for hosts that don't override |
 | `hosts`             | (one host, see `deploy/config.yaml`) | The list of hosts to proxy for |
 
 Each entry in `hosts`:
@@ -119,6 +129,7 @@ Each entry in `hosts`:
 | `refresh_interval`  | no       | Overrides the top-level default for this host only       |
 | `mdns_timeout`      | no       | Overrides the top-level default for this host only       |
 | `dial_timeout`      | no       | Overrides the top-level default for this host only       |
+| `failure_cooldown`  | no       | Overrides the top-level default for this host only       |
 
 **Hot reload:** editing `hosts` (adding, removing, or changing any host's
 settings), or the top-level defaults, takes effect within a few seconds
@@ -240,6 +251,12 @@ place for it anyway: the router already sees all your devices' traffic on
 the LAN, so there's no L2/VLAN bridging question the way there is for an
 LXC container (see the networking caveat below), as long as the proxy
 port(s) aren't firewalled off from the LAN zone (they aren't, by default).
+
+**Want a LuCI web UI instead of hand-editing `config.yaml`?** See
+[`openwrt/`](openwrt/) — a self-contained UCI config + LuCI app (start/
+stop/restart, edit hosts, live status) plus a script that builds a real
+installable `.ipk`. The steps below are the bare-metal version with no
+GUI; `openwrt/README.md` covers the packaged version.
 
 **1. Find the router's architecture**, since it's essentially never amd64:
 

@@ -81,6 +81,7 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 		RefreshInterval: duration(time.Hour), // long TTL: our manual snapshot below must stick
 		MDNSTimeout:     duration(time.Second),
 		DialTimeout:     duration(2 * time.Second),
+		FailureCooldown: duration(5 * time.Second),
 		Hosts: []hostConfig{
 			{Name: "test-host", MDNSHostname: "unused.local", Port: charlesPort, ListenPort: 0},
 		},
@@ -96,6 +97,10 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 		Transport: &http.Transport{
 			Proxy:           http.ProxyURL(proxyURL),
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: true},
+			// Each subtest changes the health cache and expects its request
+			// to actually re-enter our handler; a pooled/reused CONNECT
+			// tunnel from an earlier subtest would silently skip it.
+			DisableKeepAlives: true,
 		},
 	}
 
@@ -155,9 +160,12 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 		}
 	})
 
-	t.Run("chained CONNECT falls back to DIRECT when Charles refuses", func(t *testing.T) {
+	t.Run("chained CONNECT falls back to DIRECT when Charles refuses, and invalidates the cache", func(t *testing.T) {
 		// Point at a closed port so the chained CONNECT attempt itself fails,
 		// exercising the fallback-to-DIRECT branch inside handleConnect.
+		// Fresh host state so an earlier subtest's failure cooldown can't
+		// mask this one's invalidation.
+		states.remove("test-host")
 		deadLn, _ := net.Listen("tcp", "127.0.0.1:0")
 		deadPort := deadLn.Addr().(*net.TCPAddr).Port
 		deadLn.Close()
@@ -173,6 +181,55 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 		body, _ := io.ReadAll(resp.Body)
 		if string(body) != "hello from tls origin" {
 			t.Fatalf("unexpected body: %q", body)
+		}
+
+		if !states.get("test-host").peek().lastCheck.IsZero() {
+			t.Fatal("expected the failed chained CONNECT to invalidate the cache instead of waiting out refresh_interval")
+		}
+	})
+
+	t.Run("chained plain HTTP fails and invalidates the cache (no same-request fallback)", func(t *testing.T) {
+		states.remove("test-host") // fresh cooldown, same reason as above
+		deadLn, _ := net.Listen("tcp", "127.0.0.1:0")
+		deadPort := deadLn.Addr().(*net.TCPAddr).Port
+		deadLn.Close()
+
+		setHostSnapshot(states, "test-host", hostSnapshot{
+			ip: net.ParseIP("127.0.0.1"), port: deadPort, reachable: true, lastCheck: time.Now(),
+		})
+		resp, err := client.Get(origin.URL)
+		if err != nil {
+			t.Fatalf("GET: %v", err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusBadGateway {
+			t.Fatalf("expected 502 for a failed chained attempt, got %d", resp.StatusCode)
+		}
+
+		if !states.get("test-host").peek().lastCheck.IsZero() {
+			t.Fatal("expected the failed chained plain HTTP request to invalidate the cache instead of waiting out refresh_interval")
+		}
+	})
+
+	t.Run("DIRECT failures don't invalidate the cache", func(t *testing.T) {
+		// The destination itself being unreachable is unrelated to Charles's
+		// health and must not be mistaken for a chained-path failure.
+		states.remove("test-host")
+		setHostSnapshot(states, "test-host", hostSnapshot{reachable: false, lastCheck: time.Now()})
+
+		deadLn, _ := net.Listen("tcp", "127.0.0.1:0")
+		deadTarget := deadLn.Addr().String()
+		deadLn.Close()
+
+		req, _ := http.NewRequest(http.MethodGet, "http://"+deadTarget, nil)
+		resp, err := client.Do(req)
+		if err == nil {
+			resp.Body.Close()
+		}
+
+		snap := states.get("test-host").peek()
+		if snap.lastCheck.IsZero() || snap.reachable {
+			t.Fatalf("a DIRECT-path failure should not touch the cached reachable=false state, got %+v", snap)
 		}
 	})
 }

@@ -46,6 +46,7 @@ type hostConfig struct {
 	RefreshInterval *duration `yaml:"refresh_interval,omitempty"`
 	MDNSTimeout     *duration `yaml:"mdns_timeout,omitempty"`
 	DialTimeout     *duration `yaml:"dial_timeout,omitempty"`
+	FailureCooldown *duration `yaml:"failure_cooldown,omitempty"`
 }
 
 // effectiveHost is a hostConfig with all the global defaults resolved in.
@@ -57,6 +58,7 @@ type effectiveHost struct {
 	RefreshInterval time.Duration
 	MDNSTimeout     time.Duration
 	DialTimeout     time.Duration
+	FailureCooldown time.Duration
 }
 
 type fileConfig struct {
@@ -65,11 +67,12 @@ type fileConfig struct {
 	RefreshInterval duration     `yaml:"refresh_interval"`
 	MDNSTimeout     duration     `yaml:"mdns_timeout"`
 	DialTimeout     duration     `yaml:"dial_timeout"`
+	FailureCooldown duration     `yaml:"failure_cooldown"`
 	Hosts           []hostConfig `yaml:"hosts"`
 }
 
 func (c fileConfig) effective(h hostConfig) effectiveHost {
-	ri, mt, dt := c.RefreshInterval, c.MDNSTimeout, c.DialTimeout
+	ri, mt, dt, fc := c.RefreshInterval, c.MDNSTimeout, c.DialTimeout, c.FailureCooldown
 	if h.RefreshInterval != nil {
 		ri = *h.RefreshInterval
 	}
@@ -79,6 +82,9 @@ func (c fileConfig) effective(h hostConfig) effectiveHost {
 	if h.DialTimeout != nil {
 		dt = *h.DialTimeout
 	}
+	if h.FailureCooldown != nil {
+		fc = *h.FailureCooldown
+	}
 	return effectiveHost{
 		Name:            h.Name,
 		MDNSHostname:    h.MDNSHostname,
@@ -87,6 +93,7 @@ func (c fileConfig) effective(h hostConfig) effectiveHost {
 		RefreshInterval: ri.Duration(),
 		MDNSTimeout:     mt.Duration(),
 		DialTimeout:     dt.Duration(),
+		FailureCooldown: fc.Duration(),
 	}
 }
 
@@ -106,6 +113,7 @@ func defaultConfig() fileConfig {
 		RefreshInterval: duration(15 * time.Second),
 		MDNSTimeout:     duration(2 * time.Second),
 		DialTimeout:     duration(1 * time.Second),
+		FailureCooldown: duration(5 * time.Second),
 		Hosts: []hostConfig{
 			{Name: "dereks-macbook", MDNSHostname: "dereks-MacBook-Pro.local", Port: 8888, ListenPort: 8081},
 		},

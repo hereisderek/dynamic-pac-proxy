@@ -20,6 +20,12 @@ refresh_interval: 15s
 mdns_timeout: 2s
 dial_timeout: 1s
 
+# If a request actually fails to reach Charles despite the cache saying it
+# was reachable, the cache is invalidated right away instead of waiting out
+# the rest of refresh_interval — but at most once per failure_cooldown, so
+# a burst of failing requests doesn't force a recheck on every single one.
+failure_cooldown: 5s
+
 hosts:
   - name: derek-macbook
     mdns_hostname: dereks-MacBook-Pro.local
@@ -30,8 +36,9 @@ hosts:
                        # Charles when it's reachable, DIRECT when it's not.
 
   # A second host, with its own ports and a per-host override of the
-  # defaults above (any of refresh_interval / mdns_timeout / dial_timeout
-  # can be overridden per host; omit to inherit the top-level default).
+  # defaults above (any of refresh_interval / mdns_timeout / dial_timeout /
+  # failure_cooldown can be overridden per host; omit to inherit the
+  # top-level default).
   # - name: office-pc
   #   mdns_hostname: office-desktop.local
   #   port: 9999

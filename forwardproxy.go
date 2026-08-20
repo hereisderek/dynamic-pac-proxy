@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -13,40 +14,39 @@ import (
 	"time"
 )
 
+type upstreamDecisionKey struct{}
+
+// upstreamDecision records, for one in-flight request, whether it was sent
+// chained through the upstream (Charles) or DIRECT — so the error handler
+// can tell which one actually failed and only invalidate Charles's health
+// cache if the failure was on the chained path.
+type upstreamDecision struct {
+	proxyURL *url.URL // nil means DIRECT
+}
+
 // newHostProxyHandler builds the forward-proxy handler for one configured
 // host. On every request it consults that host's lazily-refreshed health
 // cache (see hoststate.go) and either chains through the upstream (Charles)
-// if it's reachable, or goes DIRECT to the real destination if not.
+// if it's reachable, or goes DIRECT to the real destination if not. If a
+// chained attempt actually fails, the cache is invalidated so the next
+// request re-checks right away instead of waiting out refresh_interval —
+// see hostState.reportFailure.
 func newHostProxyHandler(cfgStore *configStore, states *stateStore, hostName string) http.Handler {
-	// currentUpstream resolves, for the request in flight, where traffic
-	// should go: (proxyURL, true) to chain through it, (nil, true) to go
-	// direct, or (nil, false) if the host was removed from the config.
-	currentUpstream := func() (*url.URL, bool) {
-		cfg := cfgStore.snapshot()
-		h, ok := cfg.findHost(hostName)
-		if !ok {
-			return nil, false
-		}
-		eff := cfg.effective(h)
-		snap := states.get(hostName).getFresh(eff)
-		if !snap.reachable {
-			return nil, true
-		}
-		return &url.URL{Scheme: "http", Host: net.JoinHostPort(snap.ip.String(), strconv.Itoa(snap.port))}, true
-	}
-
 	rp := &httputil.ReverseProxy{
 		Director: func(r *http.Request) {},
 		Transport: &http.Transport{
 			Proxy: func(r *http.Request) (*url.URL, error) {
-				proxyURL, ok := currentUpstream()
-				if !ok {
-					return nil, fmt.Errorf("host %q is no longer configured", hostName)
+				dec, _ := r.Context().Value(upstreamDecisionKey{}).(*upstreamDecision)
+				if dec == nil {
+					return nil, fmt.Errorf("host %q: internal error: no upstream decision on request", hostName)
 				}
-				return proxyURL, nil
+				return dec.proxyURL, nil
 			},
 		},
 		ErrorHandler: func(w http.ResponseWriter, r *http.Request, err error) {
+			if dec, _ := r.Context().Value(upstreamDecisionKey{}).(*upstreamDecision); dec != nil && dec.proxyURL != nil {
+				reportUpstreamFailure(cfgStore, states, hostName)
+			}
 			log.Printf("host %q: proxy error for %s: %v", hostName, r.URL, err)
 			http.Error(w, "proxy error: "+err.Error(), http.StatusBadGateway)
 		},
@@ -57,8 +57,39 @@ func newHostProxyHandler(cfgStore *configStore, states *stateStore, hostName str
 			handleConnect(w, r, cfgStore, states, hostName)
 			return
 		}
+
+		cfg := cfgStore.snapshot()
+		h, ok := cfg.findHost(hostName)
+		if !ok {
+			http.Error(w, "host no longer configured", http.StatusBadGateway)
+			return
+		}
+		eff := cfg.effective(h)
+		snap := states.get(hostName).getFresh(eff)
+
+		dec := &upstreamDecision{}
+		if snap.reachable {
+			dec.proxyURL = &url.URL{Scheme: "http", Host: net.JoinHostPort(snap.ip.String(), strconv.Itoa(snap.port))}
+		}
+		r = r.WithContext(context.WithValue(r.Context(), upstreamDecisionKey{}, dec))
 		rp.ServeHTTP(w, r)
 	})
+}
+
+// reportUpstreamFailure invalidates a host's health cache after a chained
+// request actually failed to reach it, rate-limited by that host's
+// failure_cooldown so a burst of failing requests doesn't force a real
+// mDNS/dial check on every single one — just the first in each window.
+func reportUpstreamFailure(cfgStore *configStore, states *stateStore, hostName string) {
+	cfg := cfgStore.snapshot()
+	h, ok := cfg.findHost(hostName)
+	if !ok {
+		return
+	}
+	eff := cfg.effective(h)
+	if states.get(hostName).reportFailure(eff.FailureCooldown) {
+		log.Printf("host %q: chained request failed, invalidating cached health for early recheck", hostName)
+	}
 }
 
 // handleConnect implements HTTPS tunneling: hijack the client connection,
@@ -79,6 +110,7 @@ func handleConnect(w http.ResponseWriter, r *http.Request, cfgStore *configStore
 		conn, err := chainedConnect(snap.ip.String(), snap.port, r.Host, eff.DialTimeout)
 		if err != nil {
 			log.Printf("host %q: chained CONNECT to %s via upstream failed, falling back to DIRECT: %v", hostName, r.Host, err)
+			reportUpstreamFailure(cfgStore, states, hostName)
 		} else {
 			upstream = conn
 		}
