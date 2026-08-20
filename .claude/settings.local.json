@@ -32,7 +32,11 @@
       "Bash(/Volumes/private/workspace/myprojects/dynamic-pac-proxy/openwrt/scripts/install-over-ssh.sh -h)",
       "Bash(tar czf *)",
       "Bash(tar tzf *)",
-      "Bash(rm -f /tmp/files-test.tar.gz)"
+      "Bash(rm -f /tmp/files-test.tar.gz)",
+      "Bash(python3 -c \"import yaml\")",
+      "Bash(pip3 install *)",
+      "Bash(python3 -)",
+      "Bash(ruby -ryaml -e 'puts \"ruby yaml ok\"')"
     ]
   }
 }

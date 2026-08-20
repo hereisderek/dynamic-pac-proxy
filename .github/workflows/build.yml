@@ -1,0 +1,146 @@
+name: Build
+
+# Reusable workflow: test, then build plain binaries and OpenWRT .ipks for
+# a curated set of targets, uploading each as a build artifact. Called by
+# both ci.yml (PRs / pushes to main, no version) and release.yml (tags,
+# with the version derived from the tag name).
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: "Version string for artifact filenames (e.g. 0.0.1). Empty for CI builds."
+        required: false
+        type: string
+        default: ""
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+      - run: go vet ./...
+      - run: go test ./...
+
+  binaries:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+            goarm: ""
+          - goos: linux
+            goarch: arm64
+            goarm: ""
+          - goos: linux
+            goarch: arm
+            goarm: "7"
+          - goos: linux
+            goarch: "386"
+            goarm: ""
+          - goos: linux
+            goarch: mipsle
+            goarm: ""
+          - goos: linux
+            goarch: mips
+            goarm: ""
+    env:
+      GOOS: ${{ matrix.goos }}
+      GOARCH: ${{ matrix.goarch }}
+      GOARM: ${{ matrix.goarm }}
+      CGO_ENABLED: "0"
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+      - name: Build and package
+        run: |
+          set -euo pipefail
+
+          version="$VERSION"
+          if [ -z "$version" ]; then
+            version="0.0.0-ci.$(git rev-parse --short HEAD)"
+          fi
+
+          suffix="${GOOS}_${GOARCH}"
+          [ -n "$GOARM" ] && suffix="${suffix}v${GOARM}"
+
+          name="dynamic-pac-proxy_${version}_${suffix}"
+
+          go build -ldflags="-s -w" -o dynamic-pac-proxy .
+
+          mkdir -p "release/$name"
+          mv dynamic-pac-proxy "release/$name/"
+          cp README.md "release/$name/"
+          cp -R deploy "release/$name/"
+          tar -C release -czf "${name}.tar.gz" "$name"
+
+          echo "ARTIFACT_NAME=binary-${suffix}" >> "$GITHUB_ENV"
+          echo "TARBALL=${name}.tar.gz" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: ${{ env.TARBALL }}
+
+  openwrt:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - opkg_arch: aarch64_generic
+            goarch: arm64
+            goarm: ""
+          - opkg_arch: arm_cortex-a7_neon-vfpv4
+            goarch: arm
+            goarm: "7"
+          - opkg_arch: arm_cortex-a9
+            goarch: arm
+            goarm: "7"
+          - opkg_arch: mipsel_24kc
+            goarch: mipsle
+            goarm: ""
+          - opkg_arch: mips_24kc
+            goarch: mips
+            goarm: ""
+          - opkg_arch: x86_64
+            goarch: amd64
+            goarm: ""
+    env:
+      OPKG_ARCH: ${{ matrix.opkg_arch }}
+      GOARCH: ${{ matrix.goarch }}
+      GOARM: ${{ matrix.goarm }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "stable"
+      - name: Build ipk
+        run: |
+          set -euo pipefail
+
+          version="$VERSION"
+          if [ -z "$version" ]; then
+            version="0.0.0-ci.$(git rev-parse --short HEAD)"
+          fi
+
+          args=(-a "$OPKG_ARCH" -g "$GOARCH" -v "$version")
+          [ -n "$GOARM" ] && args+=(-m "$GOARM")
+
+          chmod +x ./openwrt/scripts/build-ipk.sh
+          ./openwrt/scripts/build-ipk.sh "${args[@]}"
+          echo "ARTIFACT_NAME=ipk-${OPKG_ARCH}" >> "$GITHUB_ENV"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: openwrt/dist/*.ipk
