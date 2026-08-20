@@ -47,6 +47,45 @@ box, which makes the online/offline call itself, per request, in real time.
 - `GET /status` — JSON array, one entry per host, with its last resolved
   IP, reachability, and last error. Querying it also counts as "a request
   came in", so it can trigger a check the same way live traffic does.
+- `GET /certs` — a page listing any certificate files placed in the certs
+  directory, with download links and per-platform install instructions —
+  see "SSL certificates" below.
+- Every proxied request (plain HTTP and CONNECT alike) is logged with the
+  client device's own address (`r.RemoteAddr`) alongside the requested
+  host and whether it went chained-through-Charles or DIRECT — see
+  "Access logging" below.
+
+## Project layout
+
+```
+main.go              thin entrypoint: flags, wiring, the top-level HTTP mux
+internal/
+  config/             YAML schema, hot-reload, config/certs path resolution
+  health/             lazy TTL-gated reachability cache
+  proxy/               the forward-proxy handler + per-host listener manager
+  mdns/               raw mDNS (RFC 6762) A-record resolver
+  webui/              /proxy/<name>.pac, /status, /certs
+  install/            --install/--uninstall (systemd/OpenRC)
+tests/
+  config/, health/, proxy/, webui/   one test package per internal/ package
+deploy/               example config.yaml + systemd/OpenRC/OpenWRT unit files
+openwrt/              self-contained OpenWRT UCI+LuCI package (see its own README)
+certs/                drop your exported Charles root certificate here
+```
+
+`main.go` stays at the repo root (rather than under `cmd/`) because it
+`go:embed`s `deploy/config.yaml` as the seed config for `--install` — embed
+patterns can't use `..`, so the embedding package has to be an ancestor of
+`deploy/`, and the root is the simplest one that is. Everything else lives
+in `internal/` with a small, deliberate exported API between packages; see
+CLAUDE.md for the full per-package breakdown and the reasoning behind the
+design (lazy health checks, fixed listen ports, etc.).
+
+Tests are black-box: each `tests/<pkg>/*_test.go` file is `package
+<pkg>_test`, importing `internal/<pkg>` and exercising only what it
+exports — this is what keeps tests physically separate from the code they
+test while still being able to reach package internals that matter (e.g.
+`health.State.SetSnapshot` to seed a fake reachability result).
 
 ## Build
 
@@ -116,6 +155,7 @@ Top-level fields:
 | `mdns_timeout`      | `2s`             | Default mDNS reply timeout for hosts that don't override |
 | `dial_timeout`      | `1s`             | Default TCP dial timeout for hosts that don't override |
 | `failure_cooldown`  | `5s`             | Default minimum spacing between failure-triggered early rechecks, for hosts that don't override |
+| `certs_dir`         | a `certs` folder next to `config.yaml` | Directory served at `/certs` for downloading/installing Charles's SSL certificate — see "SSL certificates" below |
 | `hosts`             | (one host, see `deploy/config.yaml`) | The list of hosts to proxy for |
 
 Each entry in `hosts`:
@@ -359,6 +399,46 @@ http://<lxc-host-ip>:8080/proxy/<name>.pac
 Either way, this is a one-time setup: the address never needs to be
 re-fetched or changed. Whether Charles is currently reachable is decided
 per request, on this box, not by anything the device caches.
+
+## Access logging
+
+Every proxied request is logged (to stdout, which lands in
+`/var/log/dynamic-pac-proxy.log` under OpenRC — see "Current deployment" in
+CLAUDE.md) with the originating device's own address, not Charles's or the
+target's:
+
+```
+host "derek-macbook": GET http://example.com/ from 192.168.1.42 -> chained via 192.168.1.30:8888
+host "derek-macbook": CONNECT example.com:443 from 192.168.1.42 -> chained
+```
+
+This works because devices are configured to talk straight to this box
+(per the PAC/manual proxy setup above) — `r.RemoteAddr` on every request is
+therefore always the real client device, never a hop through Charles. If
+you were previously trying to answer "who visited what" purely from
+Charles's own logs, that's exactly what was missing: chained requests reach
+Charles *from this box*, so Charles's own logs show this box's IP as the
+source, not the original device's. Cross-reference the logged IP with your
+router's DHCP client list (or set static/reserved LAN IPs for known
+devices) to turn it into a device name.
+
+## SSL certificates
+
+For Charles to man-in-the-middle HTTPS traffic (SSL Proxying), each client
+device needs to install and trust Charles's own root certificate. `GET
+/certs` (same port as `/status` and `/proxy/<name>.pac`, e.g.
+`http://172.16.2.22:8080/certs`) serves a page listing whatever certificate
+files you've placed in the certs directory, with download links and
+per-platform (iOS/Android/macOS/Windows) install instructions.
+
+The certificate itself is never bundled with this binary — Charles
+generates its own root certificate per install, so there's no single file
+that would work for everyone. Export yours from Charles
+(**Help > SSL Proxying > Save Charles Root Certificate...**) and drop it
+into the certs directory; see `certs/README.md` for details. The directory
+defaults to a `certs` folder next to `config.yaml` (override with
+`certs_dir`), and — like the config file itself — is read fresh on every
+request, so dropping in a new certificate doesn't need a restart.
 
 Check `http://<lxc-host-ip>:8080/status` any time to see what each
 configured host currently resolved to and whether it's reachable.

@@ -1,10 +1,14 @@
-package main
+// Package config owns the YAML config schema, hot-reload, and the derived
+// filesystem paths (the config file itself, and the certs directory served
+// at /certs) that the rest of the daemon is built around.
+package config
 
 import (
 	"fmt"
 	"log"
 	"net"
 	"os"
+	"path/filepath"
 	"regexp"
 	"sync"
 	"time"
@@ -12,15 +16,20 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// duration parses as a Go duration string ("15s") in YAML instead of yaml.v3's
-// default nanosecond integer, matching what a human editing the file expects.
-type duration time.Duration
+// EtcConfigPath is the default, well-known config location used when
+// nothing else is specified — see ResolveConfigPath.
+const EtcConfigPath = "/etc/dynamic-pac-proxy/config.yaml"
 
-func (d duration) Duration() time.Duration { return time.Duration(d) }
+// Duration parses as a Go duration string ("15s") in YAML instead of
+// yaml.v3's default nanosecond integer, matching what a human editing the
+// file expects.
+type Duration time.Duration
 
-func (d duration) String() string { return time.Duration(d).String() }
+func (d Duration) Duration() time.Duration { return time.Duration(d) }
 
-func (d *duration) UnmarshalYAML(value *yaml.Node) error {
+func (d Duration) String() string { return time.Duration(d).String() }
+
+func (d *Duration) UnmarshalYAML(value *yaml.Node) error {
 	var s string
 	if err := value.Decode(&s); err != nil {
 		return err
@@ -29,28 +38,28 @@ func (d *duration) UnmarshalYAML(value *yaml.Node) error {
 	if err != nil {
 		return fmt.Errorf("invalid duration %q: %w", s, err)
 	}
-	*d = duration(parsed)
+	*d = Duration(parsed)
 	return nil
 }
 
 var hostNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 
-// hostConfig is one entry in the hosts list. The timeout/interval fields are
+// HostConfig is one entry in the hosts list. The timeout/interval fields are
 // pointers so we can tell "not set, inherit the global default" apart from
 // an explicit (if silly) zero value.
-type hostConfig struct {
+type HostConfig struct {
 	Name            string    `yaml:"name"`
 	MDNSHostname    string    `yaml:"mdns_hostname"`
 	Port            int       `yaml:"port"`
 	ListenPort      int       `yaml:"listen_port"`
-	RefreshInterval *duration `yaml:"refresh_interval,omitempty"`
-	MDNSTimeout     *duration `yaml:"mdns_timeout,omitempty"`
-	DialTimeout     *duration `yaml:"dial_timeout,omitempty"`
-	FailureCooldown *duration `yaml:"failure_cooldown,omitempty"`
+	RefreshInterval *Duration `yaml:"refresh_interval,omitempty"`
+	MDNSTimeout     *Duration `yaml:"mdns_timeout,omitempty"`
+	DialTimeout     *Duration `yaml:"dial_timeout,omitempty"`
+	FailureCooldown *Duration `yaml:"failure_cooldown,omitempty"`
 }
 
-// effectiveHost is a hostConfig with all the global defaults resolved in.
-type effectiveHost struct {
+// EffectiveHost is a HostConfig with all the global defaults resolved in.
+type EffectiveHost struct {
 	Name            string
 	MDNSHostname    string
 	Port            int
@@ -61,17 +70,18 @@ type effectiveHost struct {
 	FailureCooldown time.Duration
 }
 
-type fileConfig struct {
+type FileConfig struct {
 	ListenAddr      string       `yaml:"listen_addr"`
 	AdvertiseHost   string       `yaml:"advertise_host"`
-	RefreshInterval duration     `yaml:"refresh_interval"`
-	MDNSTimeout     duration     `yaml:"mdns_timeout"`
-	DialTimeout     duration     `yaml:"dial_timeout"`
-	FailureCooldown duration     `yaml:"failure_cooldown"`
-	Hosts           []hostConfig `yaml:"hosts"`
+	RefreshInterval Duration     `yaml:"refresh_interval"`
+	MDNSTimeout     Duration     `yaml:"mdns_timeout"`
+	DialTimeout     Duration     `yaml:"dial_timeout"`
+	FailureCooldown Duration     `yaml:"failure_cooldown"`
+	CertsDir        string       `yaml:"certs_dir,omitempty"`
+	Hosts           []HostConfig `yaml:"hosts"`
 }
 
-func (c fileConfig) effective(h hostConfig) effectiveHost {
+func (c FileConfig) Effective(h HostConfig) EffectiveHost {
 	ri, mt, dt, fc := c.RefreshInterval, c.MDNSTimeout, c.DialTimeout, c.FailureCooldown
 	if h.RefreshInterval != nil {
 		ri = *h.RefreshInterval
@@ -85,7 +95,7 @@ func (c fileConfig) effective(h hostConfig) effectiveHost {
 	if h.FailureCooldown != nil {
 		fc = *h.FailureCooldown
 	}
-	return effectiveHost{
+	return EffectiveHost{
 		Name:            h.Name,
 		MDNSHostname:    h.MDNSHostname,
 		Port:            h.Port,
@@ -97,24 +107,24 @@ func (c fileConfig) effective(h hostConfig) effectiveHost {
 	}
 }
 
-func (c fileConfig) findHost(name string) (hostConfig, bool) {
+func (c FileConfig) FindHost(name string) (HostConfig, bool) {
 	for _, h := range c.Hosts {
 		if h.Name == name {
 			return h, true
 		}
 	}
-	return hostConfig{}, false
+	return HostConfig{}, false
 }
 
-func defaultConfig() fileConfig {
-	return fileConfig{
+func DefaultConfig() FileConfig {
+	return FileConfig{
 		ListenAddr:      ":8080",
 		AdvertiseHost:   detectLANAddress(),
-		RefreshInterval: duration(15 * time.Second),
-		MDNSTimeout:     duration(2 * time.Second),
-		DialTimeout:     duration(1 * time.Second),
-		FailureCooldown: duration(5 * time.Second),
-		Hosts: []hostConfig{
+		RefreshInterval: Duration(15 * time.Second),
+		MDNSTimeout:     Duration(2 * time.Second),
+		DialTimeout:     Duration(1 * time.Second),
+		FailureCooldown: Duration(5 * time.Second),
+		Hosts: []HostConfig{
 			{Name: "dereks-macbook", MDNSHostname: "dereks-MacBook-Pro.local", Port: 8888, ListenPort: 8081},
 		},
 	}
@@ -155,7 +165,7 @@ func portFromAddr(addr string) (int, bool) {
 	return port, true
 }
 
-func validateConfig(cfg fileConfig) error {
+func ValidateConfig(cfg FileConfig) error {
 	if len(cfg.Hosts) == 0 {
 		return fmt.Errorf("hosts: at least one host must be configured")
 	}
@@ -195,48 +205,56 @@ func validateConfig(cfg fileConfig) error {
 	return nil
 }
 
-// parseConfig overlays YAML onto the defaults, so a config file only needs
+// ParseConfig overlays YAML onto the defaults, so a config file only needs
 // to mention the fields it wants to override — except hosts, which fully
 // replaces the default host list as soon as the file specifies any.
-func parseConfig(data []byte) (fileConfig, error) {
-	cfg := defaultConfig()
+func ParseConfig(data []byte) (FileConfig, error) {
+	cfg := DefaultConfig()
 	if err := yaml.Unmarshal(data, &cfg); err != nil {
-		return fileConfig{}, err
+		return FileConfig{}, err
 	}
-	if err := validateConfig(cfg); err != nil {
-		return fileConfig{}, err
+	if err := ValidateConfig(cfg); err != nil {
+		return FileConfig{}, err
 	}
 	return cfg, nil
 }
 
-// configStore holds the current config plus the mtime it was loaded from,
-// and is safe for concurrent reads from the HTTP handlers and refresh loops
-// while a background goroutine polls for edits.
-type configStore struct {
+// Store holds the current config plus the mtime it was loaded from, and is
+// safe for concurrent reads from the HTTP handlers and refresh loops while
+// a background goroutine polls for edits.
+type Store struct {
 	path string
 
 	mu      sync.RWMutex
-	cfg     fileConfig
+	cfg     FileConfig
 	modTime time.Time
 }
 
-// loadInitial loads the config file at startup. A missing file falls back
+// NewStore builds a Store directly from an already-parsed config, without
+// reading a file — useful for embedding this package as a library, or for
+// tests that want to control the config precisely. path only affects
+// derived locations (see CertsDir); it need not exist on disk.
+func NewStore(cfg FileConfig, path string) *Store {
+	return &Store{cfg: cfg, path: path}
+}
+
+// LoadInitial loads the config file at startup. A missing file falls back
 // to built-in defaults (so the service is usable with no setup); a present
 // but invalid file fails fast rather than starting up misconfigured.
-func loadInitial(path string) (*configStore, error) {
-	s := &configStore{path: path}
+func LoadInitial(path string) (*Store, error) {
+	s := &Store{path: path}
 
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		log.Printf("no config file at %s, using built-in defaults", path)
-		s.cfg = defaultConfig()
+		s.cfg = DefaultConfig()
 		return s, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read config %s: %w", path, err)
 	}
 
-	cfg, err := parseConfig(data)
+	cfg, err := ParseConfig(data)
 	if err != nil {
 		return nil, fmt.Errorf("parse config %s: %w", path, err)
 	}
@@ -247,11 +265,11 @@ func loadInitial(path string) (*configStore, error) {
 	return s, nil
 }
 
-// reloadIfChanged re-reads the config file if its mtime moved since the
+// ReloadIfChanged re-reads the config file if its mtime moved since the
 // last successful load. A parse/validation error is logged and the
 // previous known-good config is kept, so a mid-edit typo can't take the
 // service down.
-func (s *configStore) reloadIfChanged() {
+func (s *Store) ReloadIfChanged() {
 	info, err := os.Stat(s.path)
 	if err != nil {
 		return
@@ -269,7 +287,7 @@ func (s *configStore) reloadIfChanged() {
 		log.Printf("config reload: read %s: %v", s.path, err)
 		return
 	}
-	cfg, err := parseConfig(data)
+	cfg, err := ParseConfig(data)
 	if err != nil {
 		log.Printf("config reload: %s is invalid, keeping previous config: %v", s.path, err)
 		return
@@ -287,8 +305,54 @@ func (s *configStore) reloadIfChanged() {
 	log.Printf("config reloaded from %s: hosts=%v", s.path, names)
 }
 
-func (s *configStore) snapshot() fileConfig {
+func (s *Store) Snapshot() FileConfig {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return s.cfg
+}
+
+// ResolveConfigPath picks the config file location: an explicit --config
+// flag wins outright; otherwise /etc/dynamic-pac-proxy/config.yaml if it
+// exists, then config.yaml next to the binary if that exists, falling back
+// to the /etc path (which LoadInitial will treat as "use defaults" if
+// nothing is actually there).
+func ResolveConfigPath(flagValue string) (path string, source string) {
+	if flagValue != "" {
+		return flagValue, "--config flag"
+	}
+	if _, err := os.Stat(EtcConfigPath); err == nil {
+		return EtcConfigPath, "default location"
+	}
+	if exe, err := os.Executable(); err == nil {
+		besideBinary := filepath.Join(filepath.Dir(exe), "config.yaml")
+		if _, err := os.Stat(besideBinary); err == nil {
+			return besideBinary, "next to binary"
+		}
+	}
+	return EtcConfigPath, "none found, falling back to default location"
+}
+
+// ResolveCertsDir picks the directory served at /certs. An explicit
+// certs_dir in config.yaml wins outright (resolved relative to the config
+// file's own directory if it isn't already absolute); otherwise it defaults
+// to a "certs" directory next to the config file, mirroring how the config
+// file and binary already live side by side in deployment.
+func ResolveCertsDir(cfg FileConfig, configPath string) string {
+	base := filepath.Dir(configPath)
+	if cfg.CertsDir == "" {
+		return filepath.Join(base, "certs")
+	}
+	if filepath.IsAbs(cfg.CertsDir) {
+		return cfg.CertsDir
+	}
+	return filepath.Join(base, cfg.CertsDir)
+}
+
+// CertsDir returns the currently-configured certs directory, re-resolved
+// against whatever config is live right now so a hot-reloaded certs_dir
+// takes effect on the next request without a restart.
+func (s *Store) CertsDir() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return ResolveCertsDir(s.cfg, s.path)
 }

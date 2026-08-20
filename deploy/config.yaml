@@ -26,6 +26,11 @@ dial_timeout: 1s
 # a burst of failing requests doesn't force a recheck on every single one.
 failure_cooldown: 5s
 
+# Directory served at http://<advertise_host>:8080/certs, for downloading
+# and installing Charles's SSL root certificate (see certs/README.md).
+# Defaults to a "certs" folder next to this config file if left unset.
+# certs_dir: "certs"
+
 hosts:
   - name: derek-macbook
     mdns_hostname: dereks-MacBook-Pro.local

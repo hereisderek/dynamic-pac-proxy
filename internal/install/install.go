@@ -1,17 +1,18 @@
-package main
+// Package install implements `--install`/`--uninstall`: detecting the init
+// system (systemd or OpenRC), rendering + writing the matching service
+// definition, and seeding a config file if none exists yet.
+package install
 
 import (
-	_ "embed"
 	"fmt"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-)
 
-//go:embed deploy/config.yaml
-var seedConfigYAML []byte
+	"github.com/derekhud/dynamic-pac-proxy/internal/config"
+)
 
 const (
 	systemdUnitPath  = "/etc/systemd/system/dynamic-pac-proxy.service"
@@ -83,23 +84,26 @@ func runCmd(name string, args ...string) error {
 	return nil
 }
 
-// ensureConfigFile seeds path with the example config (from deploy/config.yaml)
-// if nothing exists there yet. It never overwrites an existing file.
-func ensureConfigFile(path string) error {
+// ensureConfigFile seeds path with seedYAML if nothing exists there yet. It
+// never overwrites an existing file.
+func ensureConfigFile(path string, seedYAML []byte) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
 	}
-	if err := os.WriteFile(path, seedConfigYAML, 0o644); err != nil {
+	if err := os.WriteFile(path, seedYAML, 0o644); err != nil {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	log.Printf("wrote default config to %s (edit it, then restart the service)", path)
 	return nil
 }
 
-func runInstall(configFlagValue string) error {
+// Run installs and starts the service. seedYAML is the example config
+// (embedded by the caller from deploy/config.yaml) used to seed a fresh
+// config file if the resolved path doesn't have one yet.
+func Run(configFlagValue string, seedYAML []byte) error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("must be run as root, e.g.: sudo %s --install", os.Args[0])
 	}
@@ -112,9 +116,9 @@ func runInstall(configFlagValue string) error {
 		binaryPath = resolved
 	}
 
-	configPath, source := resolveConfigPath(configFlagValue)
+	configPath, source := config.ResolveConfigPath(configFlagValue)
 	log.Printf("using config file: %s (%s)", configPath, source)
-	if err := ensureConfigFile(configPath); err != nil {
+	if err := ensureConfigFile(configPath, seedYAML); err != nil {
 		return err
 	}
 
@@ -162,7 +166,9 @@ func installOpenRC(binaryPath, configPath string) error {
 	return nil
 }
 
-func runUninstall() error {
+// Uninstall stops and removes the installed service definition, leaving
+// the config file in place.
+func Uninstall() error {
 	if os.Geteuid() != 0 {
 		return fmt.Errorf("must be run as root, e.g.: sudo %s --uninstall", os.Args[0])
 	}

@@ -1,3 +1,7 @@
 /dynamic-pac-proxy
 /dynamic-pac-proxy-linux-amd64
 /openwrt/dist/
+
+# actual certificate files a user drops in locally; only certs/README.md is tracked
+/certs/*
+!/certs/README.md

@@ -1,4 +1,7 @@
-package main
+// Package mdns implements a from-scratch mDNS (RFC 6762) A-record resolver
+// over raw multicast UDP — not a shell-out to avahi-resolve — deliberately,
+// so it works on a minimal container with no avahi-daemon running.
+package mdns
 
 import (
 	"fmt"
