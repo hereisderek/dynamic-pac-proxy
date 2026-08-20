@@ -1,0 +1,27 @@
+# dynamic-pac-proxy config.
+#
+# Edits to this file are picked up automatically within a few seconds while
+# the service is running (no restart needed) — except listen_addr, which
+# requires a restart since it means rebinding the HTTP listener. Adding or
+# removing entries from `hosts` also applies live.
+
+listen_addr: ":8080"
+
+# Defaults applied to any host below that doesn't override them.
+refresh_interval: 15s
+mdns_timeout: 2s
+dial_timeout: 1s
+
+hosts:
+  - name: derek-macbook
+    mdns_hostname: dereks-MacBook-Pro.local
+    port: 8888
+
+  # A second host, with its own port and a per-host override of the
+  # defaults above (any of refresh_interval / mdns_timeout / dial_timeout
+  # can be overridden per host; omit to inherit the top-level default).
+  # - name: office-pc
+  #   mdns_hostname: office-desktop.local
+  #   port: 9999
+  #   refresh_interval: 5s
+  #   dial_timeout: 500ms

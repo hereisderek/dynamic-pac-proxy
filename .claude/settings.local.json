@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go mod *)",
+      "Bash(go build *)",
+      "Bash(go vet *)",
+      "Bash(git mv *)",
+      "Bash(./dynamic-pac-proxy --help)",
+      "Bash(./dynamic-pac-proxy --install)",
+      "Bash(./dynamic-pac-proxy --uninstall)",
+      "Bash(./dynamic-pac-proxy --install --uninstall)"
+    ]
+  }
+}

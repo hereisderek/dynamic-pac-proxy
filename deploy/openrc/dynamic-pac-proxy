@@ -1,0 +1,21 @@
+#!/sbin/openrc-run
+
+name="dynamic-pac-proxy"
+description="Dynamic PAC proxy (resolves Charles host over mDNS)"
+
+command="/usr/local/bin/dynamic-pac-proxy"
+command_args="--config /etc/dynamic-pac-proxy/config.yaml"
+
+# The binary runs in the foreground and doesn't fork/daemonize itself, so
+# it's supervised (started, restarted on crash, tracked by pid) rather than
+# backgrounded — this is what supervise-daemon is for.
+supervisor="supervise-daemon"
+pidfile="/run/${RC_SVCNAME}.pid"
+respawn_delay=3
+output_log="/var/log/${RC_SVCNAME}.log"
+error_log="/var/log/${RC_SVCNAME}.log"
+
+depend() {
+	need net
+	after firewall
+}
