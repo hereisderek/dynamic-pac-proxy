@@ -1,29 +1,44 @@
 # dynamic-pac-proxy
 
-Small Go service for a homelab LXC container. For each configured host
-(e.g. your Mac at `dereks-MacBook-Pro.local` running Charles on 8888), it
-keeps track of the current IP (found via mDNS/Bonjour) and confirms the
-proxy port is actually listening, and serves PAC files so test devices
-always route through the right IP — falling back to `DIRECT` if a host or
-its proxy isn't up.
+Small Go service for a homelab LXC container that sits in front of Charles
+(or any HTTP(S) proxy) running on a machine whose IP moves around — found
+via mDNS/Bonjour (e.g. `dereks-MacBook-Pro.local`).
+
+Each configured host gets its own **fixed** listening port on this box.
+Devices point their proxy settings at that fixed address once, forever —
+never at Charles's own (dynamic) IP. This box then forwards every request
+onward: to Charles, if it's currently reachable, or straight to the
+destination (`DIRECT`) if it's not. Because the address devices use never
+changes, there's nothing for a device to cache-and-go-stale on: it's not
+re-reading a PAC file to learn a new IP, it's just always talking to this
+box, which makes the online/offline call itself, per request, in real time.
 
 ## How it works
 
-- Every configured host gets its own background refresh loop (interval
-  configurable per-host, default 15s) that sends a raw mDNS A-record query
-  for that host's hostname and, if it resolves, does a quick TCP dial to
-  confirm the proxy port is listening.
-- Each host's result is cached in memory. HTTP requests never block on
-  mDNS — they just read the cached state, so PAC responses are instant.
+- Each host in `hosts:` gets a dedicated `listen_port` on this box. A
+  request arriving on that port is handled as a real forward proxy:
+  - **CONNECT** (HTTPS): the client connection is hijacked, an upstream
+    tunnel is established — chained through Charles with our own CONNECT
+    if it's reachable, or dialed straight to the target if not — and bytes
+    are spliced between the two, so TLS still terminates at the client and
+    the real destination, unmodified.
+  - **Plain HTTP proxy requests**: forwarded via `Charles:port` as the
+    upstream proxy if reachable, or fetched directly otherwise.
+- Reachability itself is a lazy, cached check per host, not a constant
+  background poll: a request only triggers a real mDNS resolve + TCP dial
+  if the cached result is older than that host's `refresh_interval`;
+  otherwise the cached result is used immediately. Concurrent requests
+  arriving right as the cache goes stale are coalesced into a single
+  check, not one each.
 - A separate poll (every 3s, fixed) checks the config file's mtime and
-  hot-reloads it on change, starting/stopping refresh loops as hosts are
-  added/removed — see "Configuration" below.
-- `GET /proxy/<name>.pac` — PAC for one specific configured host.
-- `GET /proxy.pac` — combined PAC: the first host (in config order) that's
-  currently reachable, or `DIRECT` if none are.
-- `GET /status` — JSON array, one entry per host, with its resolved IP,
-  reachability, and last error — useful for debugging from a browser or
-  curl.
+  hot-reloads it on change, starting/stopping/rebinding each host's
+  listener as hosts are added/removed/changed — see "Configuration" below.
+- `GET /proxy/<name>.pac` — a PAC file pointing at this box's own fixed
+  `advertise_host:listen_port` for that host. Static: it never needs to
+  change, since reachability is handled behind it, not by it.
+- `GET /status` — JSON array, one entry per host, with its last resolved
+  IP, reachability, and last error. Querying it also counts as "a request
+  came in", so it can trigger a check the same way live traffic does.
 
 ## Build
 
@@ -32,6 +47,7 @@ LXC container if needed).
 
 ```sh
 go mod tidy   # fetches dependencies and writes go.sum
+go test ./...
 go build -o dynamic-pac-proxy .
 
 # Cross-compile for a typical Proxmox LXC (amd64):
@@ -60,6 +76,7 @@ example:
 
 ```yaml
 listen_addr: ":8080"
+advertise_host: "192.168.1.50"   # this box's LAN IP/hostname, as seen by client devices
 
 # Defaults applied to any host below that doesn't override them.
 refresh_interval: 15s
@@ -69,24 +86,27 @@ dial_timeout: 1s
 hosts:
   - name: derek-macbook
     mdns_hostname: dereks-MacBook-Pro.local
-    port: 8888
+    port: 8888        # Charles's port on that Mac
+    listen_port: 8081  # THIS box's fixed port for that host
 
   - name: office-pc
     mdns_hostname: office-desktop.local
     port: 9999
+    listen_port: 8082
     refresh_interval: 5s   # optional per-host override
     dial_timeout: 500ms    # optional per-host override
 ```
 
 Top-level fields:
 
-| Field              | Default | Meaning                                              |
-|---------------------|---------|--------------------------------------------------------|
-| `listen_addr`       | `:8080` | Where this service listens                             |
-| `refresh_interval`  | `15s`   | Default re-check interval for hosts that don't override |
-| `mdns_timeout`      | `2s`    | Default mDNS reply timeout for hosts that don't override|
-| `dial_timeout`      | `1s`    | Default TCP dial timeout for hosts that don't override  |
-| `hosts`             | (one host, see `deploy/config.yaml`) | The list of hosts to track |
+| Field              | Default          | Meaning                                              |
+|---------------------|------------------|----------------------------------------------------|
+| `listen_addr`       | `:8080`          | Where the HTTP status/PAC server listens (not the proxy ports — see `listen_port` below) |
+| `advertise_host`    | auto-detected LAN IP | The address baked into PAC files at `/proxy/<name>.pac`; set explicitly if the auto-detected guess isn't what devices can actually reach (e.g. multi-homed box) |
+| `refresh_interval`  | `15s`            | Default health-check cache TTL for hosts that don't override it |
+| `mdns_timeout`      | `2s`             | Default mDNS reply timeout for hosts that don't override |
+| `dial_timeout`      | `1s`             | Default TCP dial timeout for hosts that don't override |
+| `hosts`             | (one host, see `deploy/config.yaml`) | The list of hosts to proxy for |
 
 Each entry in `hosts`:
 
@@ -94,26 +114,29 @@ Each entry in `hosts`:
 |---------------------|----------|-----------------------------------------------------------|
 | `name`              | yes      | Identifier used in URLs/status (`[a-zA-Z0-9_-]+`, unique)|
 | `mdns_hostname`     | yes      | Bonjour hostname to resolve, e.g. `some-machine.local`   |
-| `port`              | yes      | Port the proxy listens on for this host                  |
+| `port`              | yes      | The port Charles (or whatever proxy) listens on, on that resolved host |
+| `listen_port`       | yes      | The fixed port **this box** listens on for this host — point devices here. Must be unique across hosts and different from `listen_addr`'s port |
 | `refresh_interval`  | no       | Overrides the top-level default for this host only       |
 | `mdns_timeout`      | no       | Overrides the top-level default for this host only       |
 | `dial_timeout`      | no       | Overrides the top-level default for this host only       |
 
 **Hot reload:** editing `hosts` (adding, removing, or changing any host's
 settings), or the top-level defaults, takes effect within a few seconds
-automatically — no restart needed. Adding a host starts a new refresh loop
-for it; removing one stops its loop and drops it from `/status`.
-`listen_addr` is only read at startup, since changing it means rebinding
-the HTTP listener; that one needs a service restart (see "Deploy as an
-auto-start service" below).
+automatically — no restart needed. Adding a host starts a new proxy
+listener for it; removing one stops its listener and drops it from
+`/status`; changing `listen_port` rebinds it to the new port. Only the
+top-level `listen_addr` (the status/PAC server, not the per-host proxy
+ports) needs a restart to take effect — see "Deploy as an auto-start
+service" below.
 
 If the config file doesn't exist at startup, the service runs with a
 single built-in default host and logs that it did so. If the file exists
 but fails to parse or validate at startup (e.g. a duplicate `name`, a
-`port` out of range, an empty `hosts` list), the service refuses to start
-— fail fast rather than run with an unintended config. Once running, a bad
-edit (e.g. a YAML typo) is logged and ignored — the service keeps using
-the last known-good config instead of crashing.
+`port`/`listen_port` out of range, a `listen_port` collision between two
+hosts or with `listen_addr`, an empty `hosts` list), the service refuses
+to start — fail fast rather than run with an unintended config. Once
+running, a bad edit (e.g. a YAML typo) is logged and ignored — the service
+keeps using the last known-good config instead of crashing.
 
 ## Deploy as an auto-start service
 
@@ -209,6 +232,73 @@ systemctl status dynamic-pac-proxy
 journalctl -u dynamic-pac-proxy -f
 ```
 
+#### OpenWRT routers
+
+`--install` doesn't recognize OpenWRT's init system (`procd`) yet, so this
+one's manual — but running it directly on the router is arguably the best
+place for it anyway: the router already sees all your devices' traffic on
+the LAN, so there's no L2/VLAN bridging question the way there is for an
+LXC container (see the networking caveat below), as long as the proxy
+port(s) aren't firewalled off from the LAN zone (they aren't, by default).
+
+**1. Find the router's architecture**, since it's essentially never amd64:
+
+```sh
+ssh root@<router> 'opkg print-architecture'
+# or, cruder but usually enough:
+ssh root@<router> 'uname -m'
+```
+
+Common results and the matching Go build:
+
+| Router arch                          | Go build                                    |
+|----------------------------------------|----------------------------------------------|
+| `mipsel`, `mips_24kc` (most Broadcom/Atheros/MediaTek MIPS routers) | `GOOS=linux GOARCH=mipsle go build` |
+| `mips`, big-endian MIPS (rarer)        | `GOOS=linux GOARCH=mips go build`           |
+| `aarch64` (newer routers: GL.iNet, some Linksys/Netgear)            | `GOOS=linux GOARCH=arm64 go build`  |
+| `arm`, `armv7` (older ARM routers)      | `GOOS=linux GOARCH=arm GOARM=7 go build`    |
+
+If you're not sure which ARM variant, `GOARM=5` is the safest/slowest
+fallback; try `7` first and drop down only if the binary fails to run.
+
+**2. Build small.** Flash space on routers is often measured in tens of
+MB, not GB — strip debug symbols to cut the binary down:
+
+```sh
+GOOS=linux GOARCH=mipsle go build -ldflags="-s -w" -o dynamic-pac-proxy-mipsle .
+ssh root@<router> 'df -h /'   # check free space before copying over
+```
+
+**3. Copy the binary, config, and init script.** `/etc/dynamic-pac-proxy/`
+matches this binary's own built-in default config location, so no
+`--config` flag is needed in the init script:
+
+```sh
+ssh root@<router> 'mkdir -p /etc/dynamic-pac-proxy'
+scp dynamic-pac-proxy-mipsle root@<router>:/usr/bin/dynamic-pac-proxy
+scp deploy/config.yaml root@<router>:/etc/dynamic-pac-proxy/config.yaml
+scp deploy/openwrt/dynamic-pac-proxy root@<router>:/etc/init.d/dynamic-pac-proxy
+ssh root@<router> 'chmod +x /usr/bin/dynamic-pac-proxy /etc/init.d/dynamic-pac-proxy'
+```
+
+**4. Enable and start it:**
+
+```sh
+ssh root@<router> '/etc/init.d/dynamic-pac-proxy enable && /etc/init.d/dynamic-pac-proxy start'
+```
+
+Check it came up and see its logs (procd logs go through `logread`, not a
+file):
+
+```sh
+ssh root@<router> 'service dynamic-pac-proxy status; logread | grep dynamic-pac-proxy'
+```
+
+If devices on the LAN can't reach the proxy port, check the firewall zone
+the router's LAN interface is in — `uci show firewall` — the default LAN
+zone's input policy is normally `ACCEPT`, but a hardened config may need
+an explicit rule opening the `listen_addr`/`listen_port`s to the LAN zone.
+
 #### Anything else
 
 The binary is a single static executable that takes no more than
@@ -229,22 +319,29 @@ needs a restart (`rc-service dynamic-pac-proxy restart` on Alpine,
 ### Important networking caveat
 
 mDNS relies on multicast UDP to `224.0.0.251:5353` on the local network
-segment. This only works if the LXC container's NIC is bridged onto the
-same L2/VLAN as your Mac (the typical Proxmox `vmbr0` setup). If the
-container is behind NAT (e.g. a separate routed subnet), multicast won't
-reach it and resolution will fail — in that case you'd need an mDNS
-reflector/repeater on the network, or switch to a static IP / DHCP
-reservation for the Mac instead of hostname resolution.
+segment. This only works if wherever this binary runs shares an L2/VLAN
+with the Mac. Running it on the router itself (see "OpenWRT routers"
+above) trivially satisfies this, since the router's LAN interface is that
+segment. Running it in an LXC container needs that container's NIC
+bridged onto the same L2/VLAN as your Mac (the typical Proxmox `vmbr0`
+setup) — if the container is instead behind NAT (e.g. a separate routed
+subnet), multicast won't reach it and resolution will fail. In that case
+you'd need an mDNS reflector/repeater on the network, or switch to a
+static IP / DHCP reservation for the Mac instead of hostname resolution.
 
 ## Point a device at it
 
-On the test device, set the network's proxy configuration to "Automatic
-Proxy Configuration" / PAC URL and point it at either:
+Either configure the device's proxy manually with `advertise_host:listen_port`
+(e.g. `192.168.1.50:8081`), or use "Automatic Proxy Configuration" / PAC URL
+pointed at:
 
 ```
-http://<lxc-host-ip>:8080/proxy.pac              # first reachable host wins
-http://<lxc-host-ip>:8080/proxy/<name>.pac        # one specific host
+http://<lxc-host-ip>:8080/proxy/<name>.pac
 ```
+
+Either way, this is a one-time setup: the address never needs to be
+re-fetched or changed. Whether Charles is currently reachable is decided
+per request, on this box, not by anything the device caches.
 
 Check `http://<lxc-host-ip>:8080/status` any time to see what each
-configured host currently resolved to and whether its proxy is reachable.
+configured host currently resolved to and whether it's reachable.

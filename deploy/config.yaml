@@ -3,11 +3,19 @@
 # Edits to this file are picked up automatically within a few seconds while
 # the service is running (no restart needed) — except listen_addr, which
 # requires a restart since it means rebinding the HTTP listener. Adding or
-# removing entries from `hosts` also applies live.
+# removing entries from `hosts`, and per-host settings, also apply live.
 
 listen_addr: ":8080"
 
-# Defaults applied to any host below that doesn't override them.
+# The LAN IP or hostname client devices use to reach this box — this is
+# what gets baked into the PAC files at /proxy/<name>.pac. Auto-detected as
+# a best guess at startup if left unset, but set it explicitly if this box
+# is multi-homed or the auto-detected address isn't what devices can reach.
+advertise_host: "172.16.2.22"
+
+# How long a host's cached health check stays valid. Checks are lazy: they
+# only happen when a request comes in for a host whose cache is older than
+# this, not on a fixed background timer.
 refresh_interval: 15s
 mdns_timeout: 2s
 dial_timeout: 1s
@@ -15,13 +23,18 @@ dial_timeout: 1s
 hosts:
   - name: derek-macbook
     mdns_hostname: dereks-MacBook-Pro.local
-    port: 8888
+    port: 8888        # the port Charles listens on, on that Mac
+    listen_port: 8081  # the port THIS box listens on for this host — point
+                       # devices' proxy settings (or /proxy/derek-macbook.pac)
+                       # at advertise_host:8081; traffic is forwarded to
+                       # Charles when it's reachable, DIRECT when it's not.
 
-  # A second host, with its own port and a per-host override of the
+  # A second host, with its own ports and a per-host override of the
   # defaults above (any of refresh_interval / mdns_timeout / dial_timeout
   # can be overridden per host; omit to inherit the top-level default).
   # - name: office-pc
   #   mdns_hostname: office-desktop.local
   #   port: 9999
+  #   listen_port: 8082
   #   refresh_interval: 5s
   #   dial_timeout: 500ms

@@ -3,6 +3,7 @@ package main
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"regexp"
 	"sync"
@@ -41,6 +42,7 @@ type hostConfig struct {
 	Name            string    `yaml:"name"`
 	MDNSHostname    string    `yaml:"mdns_hostname"`
 	Port            int       `yaml:"port"`
+	ListenPort      int       `yaml:"listen_port"`
 	RefreshInterval *duration `yaml:"refresh_interval,omitempty"`
 	MDNSTimeout     *duration `yaml:"mdns_timeout,omitempty"`
 	DialTimeout     *duration `yaml:"dial_timeout,omitempty"`
@@ -51,6 +53,7 @@ type effectiveHost struct {
 	Name            string
 	MDNSHostname    string
 	Port            int
+	ListenPort      int
 	RefreshInterval time.Duration
 	MDNSTimeout     time.Duration
 	DialTimeout     time.Duration
@@ -58,6 +61,7 @@ type effectiveHost struct {
 
 type fileConfig struct {
 	ListenAddr      string       `yaml:"listen_addr"`
+	AdvertiseHost   string       `yaml:"advertise_host"`
 	RefreshInterval duration     `yaml:"refresh_interval"`
 	MDNSTimeout     duration     `yaml:"mdns_timeout"`
 	DialTimeout     duration     `yaml:"dial_timeout"`
@@ -79,6 +83,7 @@ func (c fileConfig) effective(h hostConfig) effectiveHost {
 		Name:            h.Name,
 		MDNSHostname:    h.MDNSHostname,
 		Port:            h.Port,
+		ListenPort:      h.ListenPort,
 		RefreshInterval: ri.Duration(),
 		MDNSTimeout:     mt.Duration(),
 		DialTimeout:     dt.Duration(),
@@ -97,20 +102,60 @@ func (c fileConfig) findHost(name string) (hostConfig, bool) {
 func defaultConfig() fileConfig {
 	return fileConfig{
 		ListenAddr:      ":8080",
+		AdvertiseHost:   detectLANAddress(),
 		RefreshInterval: duration(15 * time.Second),
 		MDNSTimeout:     duration(2 * time.Second),
 		DialTimeout:     duration(1 * time.Second),
 		Hosts: []hostConfig{
-			{Name: "dereks-macbook", MDNSHostname: "dereks-MacBook-Pro.local", Port: 8888},
+			{Name: "dereks-macbook", MDNSHostname: "dereks-MacBook-Pro.local", Port: 8888, ListenPort: 8081},
 		},
 	}
+}
+
+// detectLANAddress makes a best-effort guess at this box's own LAN address,
+// used as a convenience default for advertise_host so PAC files work out of
+// the box. It's only ever a fallback — set advertise_host explicitly on a
+// multi-homed box or if this guess doesn't match what client devices can
+// actually reach.
+func detectLANAddress() string {
+	addrs, err := net.InterfaceAddrs()
+	if err != nil {
+		return ""
+	}
+	for _, addr := range addrs {
+		ipNet, ok := addr.(*net.IPNet)
+		if !ok || ipNet.IP.IsLoopback() {
+			continue
+		}
+		if ip4 := ipNet.IP.To4(); ip4 != nil {
+			return ip4.String()
+		}
+	}
+	return ""
+}
+
+// portFromAddr extracts the numeric port from a "host:port" listen address.
+func portFromAddr(addr string) (int, bool) {
+	_, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0, false
+	}
+	var port int
+	if _, err := fmt.Sscanf(portStr, "%d", &port); err != nil {
+		return 0, false
+	}
+	return port, true
 }
 
 func validateConfig(cfg fileConfig) error {
 	if len(cfg.Hosts) == 0 {
 		return fmt.Errorf("hosts: at least one host must be configured")
 	}
-	seen := make(map[string]bool, len(cfg.Hosts))
+
+	listenAddrPort, _ := portFromAddr(cfg.ListenAddr)
+
+	seenNames := make(map[string]bool, len(cfg.Hosts))
+	seenPorts := make(map[int]string, len(cfg.Hosts))
 	for i, h := range cfg.Hosts {
 		if h.Name == "" {
 			return fmt.Errorf("hosts[%d]: name is required", i)
@@ -118,16 +163,26 @@ func validateConfig(cfg fileConfig) error {
 		if !hostNamePattern.MatchString(h.Name) {
 			return fmt.Errorf("hosts[%d]: name %q must match %s (it's used in URL paths)", i, h.Name, hostNamePattern.String())
 		}
-		if seen[h.Name] {
+		if seenNames[h.Name] {
 			return fmt.Errorf("hosts[%d]: duplicate name %q", i, h.Name)
 		}
-		seen[h.Name] = true
+		seenNames[h.Name] = true
 		if h.MDNSHostname == "" {
 			return fmt.Errorf("hosts[%d] (%s): mdns_hostname is required", i, h.Name)
 		}
 		if h.Port < 1 || h.Port > 65535 {
 			return fmt.Errorf("hosts[%d] (%s): port must be between 1 and 65535, got %d", i, h.Name, h.Port)
 		}
+		if h.ListenPort < 1 || h.ListenPort > 65535 {
+			return fmt.Errorf("hosts[%d] (%s): listen_port must be between 1 and 65535, got %d", i, h.Name, h.ListenPort)
+		}
+		if h.ListenPort == listenAddrPort {
+			return fmt.Errorf("hosts[%d] (%s): listen_port %d collides with listen_addr's port", i, h.Name, h.ListenPort)
+		}
+		if other, ok := seenPorts[h.ListenPort]; ok {
+			return fmt.Errorf("hosts[%d] (%s): listen_port %d is already used by host %q", i, h.Name, h.ListenPort, other)
+		}
+		seenPorts[h.ListenPort] = h.Name
 	}
 	return nil
 }

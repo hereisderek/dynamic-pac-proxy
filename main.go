@@ -69,14 +69,14 @@ func main() {
 
 	states := newStateStore()
 	manager := newHostManager(cfgStore, states)
-	manager.reconcile() // start a refresh loop for every host in the initial config
+	manager.reconcile() // start a forward-proxy listener for every host in the initial config
 
 	go func() {
 		ticker := time.NewTicker(configPollInterval)
 		defer ticker.Stop()
 		for range ticker.C {
 			cfgStore.reloadIfChanged()
-			manager.reconcile() // pick up hosts added/removed by the reload
+			manager.reconcile() // pick up hosts added/removed/rebound by the reload
 		}
 	}()
 
@@ -86,11 +86,6 @@ func main() {
 
 	mux := http.NewServeMux()
 
-	mux.HandleFunc("/proxy.pac", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
-		w.Write([]byte(combinedPAC(cfgStore.snapshot(), states)))
-	})
-
 	mux.HandleFunc("/proxy/", func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/proxy/"), ".pac")
 		if name == "" || !strings.HasSuffix(r.URL.Path, ".pac") {
@@ -98,13 +93,13 @@ func main() {
 			return
 		}
 		cfg := cfgStore.snapshot()
-		if _, ok := cfg.findHost(name); !ok {
+		h, ok := cfg.findHost(name)
+		if !ok {
 			http.NotFound(w, r)
 			return
 		}
-		snap, _ := states.get(name)
 		w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
-		w.Write([]byte(buildPAC(snap.ip, snap.port, snap.reachable)))
+		w.Write([]byte(buildPAC(cfg.AdvertiseHost, h.ListenPort)))
 	})
 
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {

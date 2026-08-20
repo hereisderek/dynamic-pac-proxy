@@ -8,7 +8,11 @@
       "Bash(./dynamic-pac-proxy --help)",
       "Bash(./dynamic-pac-proxy --install)",
       "Bash(./dynamic-pac-proxy --uninstall)",
-      "Bash(./dynamic-pac-proxy --install --uninstall)"
+      "Bash(./dynamic-pac-proxy --install --uninstall)",
+      "Bash(go test *)",
+      "Bash(pkill -f dynamic-pac-proxy)",
+      "Bash(cd *)",
+      "Bash(curl *)"
     ]
   }
 }
