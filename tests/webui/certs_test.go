@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/derekhud/dynamic-pac-proxy/internal/config"
+	"github.com/derekhud/dynamic-pac-proxy/internal/mitm"
 	"github.com/derekhud/dynamic-pac-proxy/internal/webui"
 )
 
@@ -37,6 +38,32 @@ func TestListCertFiles(t *testing.T) {
 		if names[i] != want[i] {
 			t.Fatalf("ListCertFiles() = %v, want %v", names, want)
 		}
+	}
+}
+
+// TestListCertFilesExcludesCAKey guards against the local CA's private
+// key (internal/mitm.CAKeyFileName) ever being listed on /certs. It's
+// written to config.Store.ConfigDir rather than CertsDir precisely so it
+// never gets served — but certs_dir is configured independently and can
+// resolve to the same directory (e.g. certs_dir: "."), so the exclusion
+// has to hold regardless of directory layout, not just be a consequence
+// of where the file happens to live.
+func TestListCertFilesExcludesCAKey(t *testing.T) {
+	dir := t.TempDir()
+	for _, name := range []string{"charles-root.pem", mitm.CAKeyFileName} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	files := webui.ListCertFiles(dir)
+	for _, f := range files {
+		if strings.EqualFold(f.Name, mitm.CAKeyFileName) {
+			t.Fatalf("ListCertFiles() must never include the CA private key, got %v", files)
+		}
+	}
+	if len(files) != 1 || files[0].Name != "charles-root.pem" {
+		t.Fatalf("ListCertFiles() = %v, want only charles-root.pem", files)
 	}
 }
 
@@ -118,6 +145,20 @@ func TestCertsFileHandler(t *testing.T) {
 		defer resp.Body.Close()
 		if resp.StatusCode != http.StatusNotFound {
 			t.Fatalf("status = %d, want 404", resp.StatusCode)
+		}
+	})
+
+	t.Run("404s for the CA private key even when certs_dir overlaps config dir", func(t *testing.T) {
+		if err := os.WriteFile(filepath.Join(certsDir, mitm.CAKeyFileName), []byte("private-key-bytes"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		resp, err := http.Get(srv.URL + "/certs/" + mitm.CAKeyFileName)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		if resp.StatusCode != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 — the CA private key must never be servable via /certs", resp.StatusCode)
 		}
 	})
 

@@ -33,20 +33,33 @@ failure_cooldown: 5s
 
 hosts:
   - name: derek-macbook
-    mdns_hostname: dereks-MacBook-Pro.local
-    port: 8888        # the port Charles listens on, on that Mac
-    listen_port: 8081  # the port THIS box listens on for this host — point
-                       # devices' proxy settings (or /proxy/derek-macbook.pac)
-                       # at advertise_host:8081; traffic is forwarded to
-                       # Charles when it's reachable, DIRECT when it's not.
+    host_name: dereks-MacBook-Pro.local
+    host_port: 8888    # the port Charles listens on, on that Mac
+    server_port: 8081  # the port THIS box listens on for this host — point
+                        # devices' proxy settings (or /proxy/derek-macbook.pac)
+                        # at advertise_host:8081; traffic is forwarded to
+                        # Charles when it's reachable, DIRECT when it's not.
 
-  # A second host, with its own ports and a per-host override of the
-  # defaults above (any of refresh_interval / mdns_timeout / dial_timeout /
+  # A second host, with its own ports, a per-host override of the defaults
+  # above (any of refresh_interval / mdns_timeout / dial_timeout /
   # failure_cooldown can be overridden per host; omit to inherit the
-  # top-level default).
+  # top-level default), and SSL interception enabled (see the "SSL
+  # interception" section of README.md — installing
+  # certs/dynamic-pac-proxy-ca.pem on the client is required for this to
+  # work instead of every HTTPS site failing to load).
   # - name: office-pc
-  #   mdns_hostname: office-desktop.local
-  #   port: 9999
-  #   listen_port: 8082
+  #   host_name: office-desktop.local
+  #   host_port: 9999
+  #   server_port: 8082
   #   refresh_interval: 5s
   #   dial_timeout: 500ms
+  #   intercept_ssl: true
+
+  # A host with a fixed IP instead of an mDNS hostname — for a machine
+  # that already has a static/reserved address, or that doesn't answer
+  # mDNS at all (e.g. a mitmproxy instance). Exactly one of host_name
+  # or host_ip must be set per host, never both.
+  - name: mitmproxy-box
+    host_ip: "172.16.2.23"
+    host_port: 8081      # mitmproxy's regular proxy port
+    server_port: 8082

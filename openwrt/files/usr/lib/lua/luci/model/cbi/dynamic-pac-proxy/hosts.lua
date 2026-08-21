@@ -3,9 +3,9 @@ local sys = require "luci.sys"
 local m, s, o
 
 m = Map("dynamic-pac-proxy", translate("Dynamic PAC Proxy - Hosts"),
-	translate("Each host gets its own fixed listen_port on this router. " ..
+	translate("Each host gets its own fixed server_port on this router. " ..
 		"Point a device's proxy settings (or a PAC URL at " ..
-		"/proxy/&lt;name&gt;.pac) at this router's advertise_host:listen_port " ..
+		"/proxy/&lt;name&gt;.pac) at this router's advertise_host:server_port " ..
 		"— traffic is forwarded to that host's proxy when it's reachable " ..
 		"via mDNS, or DIRECT when it's not."))
 
@@ -19,17 +19,17 @@ o = s:option(Value, "name", translate("Name"),
 		"status output. Letters, digits, - and _ only; must be unique."))
 o.rmempty = false
 
-o = s:option(Value, "mdns_hostname", translate("mDNS hostname"),
+o = s:option(Value, "host_name", translate("mDNS hostname"),
 	translate("Bonjour hostname to resolve, e.g. \"some-machine.local\"."))
 o.rmempty = false
 
-o = s:option(Value, "port", translate("Proxy port"),
+o = s:option(Value, "host_port", translate("Proxy port"),
 	translate("The port the proxy (e.g. Charles) listens on, on the " ..
 		"resolved host."))
 o.datatype = "port"
 o.rmempty = false
 
-o = s:option(Value, "listen_port", translate("Listen port"),
+o = s:option(Value, "server_port", translate("Server port"),
 	translate("The fixed port THIS router listens on for this host. " ..
 		"Must be unique and different from the Listen address's port."))
 o.datatype = "port"

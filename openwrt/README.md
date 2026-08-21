@@ -72,9 +72,9 @@ config main 'main'
 
 config host
 	option name 'derek-macbook'
-	option mdns_hostname 'dereks-MacBook-Pro.local'
-	option port '8888'
-	option listen_port '8081'
+	option host_name 'dereks-MacBook-Pro.local'
+	option host_port '8888'
+	option server_port '8081'
 	# optional per-host overrides, same names as above, omit to inherit:
 	# option refresh_interval '5s'
 	# option mdns_timeout ''
@@ -84,11 +84,13 @@ config host
 
 `host` sections are anonymous (like `config redirect` in the firewall
 config) so LuCI's table UI can add/remove them freely. `uci2yaml.sh`
-silently skips any host section missing `name`/`mdns_hostname`/`port`/
-`listen_port` (logged via `logger`) rather than producing a `config.yaml`
+silently skips any host section missing `name`/`host_name`/`host_port`/
+`server_port` (logged via `logger`) rather than producing a `config.yaml`
 that fails validation — the daemon's own validation is still the final
 word (see the parent README's "Configuration" section for what it
-enforces: unique names, port ranges, `listen_port` collisions).
+enforces: unique names, port ranges, `server_port` collisions). There's no
+UCI/LuCI equivalent of the daemon's `host_ip` (fixed-IP, no-mDNS) option
+yet — only `host_name` is wired up here.
 
 ## Using the LuCI app
 
@@ -100,7 +102,7 @@ Once installed, it's under **Services → Dynamic PAC Proxy**:
   every host's current resolved IP/reachability/last error (polls the
   daemon's own `/status` endpoint every 5s).
 - **Hosts** — add/remove/edit host entries in a table: name, mDNS
-  hostname, proxy port, listen port, and optional per-host overrides.
+  hostname, proxy port, server port, and optional per-host overrides.
 
 Saving either page regenerates `config.yaml` and, for anything other than
 `listen_addr`, applies within a few seconds without restarting the daemon.
@@ -176,7 +178,7 @@ Not verified — needs a real router:
 3. Overview page loads, shows RUNNING, and the host table populates.
 4. Add a host on the Hosts page, save & apply — confirm `cat
    /etc/dynamic-pac-proxy/config.yaml` picked it up and `logread | grep
-   dynamic-pac-proxy` shows it starting a listener on its `listen_port`.
+   dynamic-pac-proxy` shows it starting a listener on its `server_port`.
 5. Click Stop / Start / Restart on Overview — confirm the status
    indicator and `/etc/init.d/dynamic-pac-proxy status` agree.
 6. `opkg remove dynamic-pac-proxy` — confirm the service stops and

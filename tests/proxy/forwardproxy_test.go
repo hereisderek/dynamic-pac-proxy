@@ -1,19 +1,30 @@
 package proxy_test
 
 import (
+	"bufio"
 	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/derekhud/dynamic-pac-proxy/internal/config"
 	"github.com/derekhud/dynamic-pac-proxy/internal/health"
+	"github.com/derekhud/dynamic-pac-proxy/internal/mitm"
 	"github.com/derekhud/dynamic-pac-proxy/internal/proxy"
 )
+
+// noCA is a caGetter for tests that don't exercise intercept_ssl — it's
+// never actually called unless a host has intercept_ssl enabled.
+func noCA() (*mitm.CA, error) {
+	return nil, fmt.Errorf("CA not needed for this test")
+}
 
 // startFakeCharles is a minimal stand-in for Charles: it handles CONNECT by
 // tunneling bytes, and plain absolute-URI GET by fetching and relaying —
@@ -79,12 +90,12 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 		DialTimeout:     config.Duration(2 * time.Second),
 		FailureCooldown: config.Duration(5 * time.Second),
 		Hosts: []config.HostConfig{
-			{Name: "test-host", MDNSHostname: "unused.local", Port: charlesPort, ListenPort: 0},
+			{Name: "test-host", HostName: "unused.local", HostPort: charlesPort, ServerPort: 0},
 		},
 	}, "")
 
 	states := health.NewStateStore()
-	handler := proxy.NewHostHandler(cfgStore, states, "test-host")
+	handler := proxy.NewHostHandler(cfgStore, states, "test-host", noCA)
 	proxySrv := httptest.NewServer(handler)
 	defer proxySrv.Close()
 	proxyURL, _ := url.Parse(proxySrv.URL)
@@ -102,7 +113,7 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 
 	t.Run("chained plain HTTP via fake Charles", func(t *testing.T) {
 		states.Get("test-host").SetSnapshot(health.Snapshot{
-			IP: net.ParseIP(charlesIP), Port: charlesPort, Reachable: true, LastCheck: time.Now(),
+			IP: net.ParseIP(charlesIP), HostPort: charlesPort, Reachable: true, LastCheck: time.Now(),
 		})
 		resp, err := client.Get(origin.URL)
 		if err != nil {
@@ -117,7 +128,7 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 
 	t.Run("chained CONNECT (HTTPS) via fake Charles", func(t *testing.T) {
 		states.Get("test-host").SetSnapshot(health.Snapshot{
-			IP: net.ParseIP(charlesIP), Port: charlesPort, Reachable: true, LastCheck: time.Now(),
+			IP: net.ParseIP(charlesIP), HostPort: charlesPort, Reachable: true, LastCheck: time.Now(),
 		})
 		resp, err := client.Get(tlsOrigin.URL)
 		if err != nil {
@@ -167,7 +178,7 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 		deadLn.Close()
 
 		states.Get("test-host").SetSnapshot(health.Snapshot{
-			IP: net.ParseIP("127.0.0.1"), Port: deadPort, Reachable: true, LastCheck: time.Now(),
+			IP: net.ParseIP("127.0.0.1"), HostPort: deadPort, Reachable: true, LastCheck: time.Now(),
 		})
 		resp, err := client.Get(tlsOrigin.URL)
 		if err != nil {
@@ -191,7 +202,7 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 		deadLn.Close()
 
 		states.Get("test-host").SetSnapshot(health.Snapshot{
-			IP: net.ParseIP("127.0.0.1"), Port: deadPort, Reachable: true, LastCheck: time.Now(),
+			IP: net.ParseIP("127.0.0.1"), HostPort: deadPort, Reachable: true, LastCheck: time.Now(),
 		})
 		resp, err := client.Get(origin.URL)
 		if err != nil {
@@ -228,4 +239,93 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 			t.Fatalf("a DIRECT-path failure should not touch the cached reachable=false state, got %+v", snap)
 		}
 	})
+}
+
+// TestInterceptSSL exercises intercept_ssl end to end up through the point
+// this tool controls: the client completes a TLS handshake with a
+// certificate the local CA issued on the fly for the requested SNI, and
+// the decrypted request is correctly reconstructed as an absolute
+// https://<host>/<path> URL and forwarded. The final hop (dialing the real
+// "localhost:<port>" destination) is deliberately left with nothing
+// listening, so the expected outcome is a 502 delivered back over the
+// same TLS connection — that failure is real internet trust the tool
+// doesn't control, not something worth faking a working origin for here.
+func TestInterceptSSL(t *testing.T) {
+	base := t.TempDir()
+	certPath := filepath.Join(base, "ca.pem")
+	keyPath := filepath.Join(base, "ca-key.pem")
+
+	deadLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	target := fmt.Sprintf("localhost:%d", deadLn.Addr().(*net.TCPAddr).Port)
+	deadLn.Close()
+
+	cfgStore := config.NewStore(config.FileConfig{
+		ListenAddr:      ":0",
+		RefreshInterval: config.Duration(time.Hour),
+		MDNSTimeout:     config.Duration(time.Second),
+		DialTimeout:     config.Duration(2 * time.Second),
+		FailureCooldown: config.Duration(5 * time.Second),
+		Hosts: []config.HostConfig{
+			{Name: "intercept-host", HostName: "unused.local", HostPort: 1, ServerPort: 0, InterceptSSL: true},
+		},
+	}, filepath.Join(base, "config.yaml"))
+
+	states := health.NewStateStore()
+	// Unreachable, so the decrypted request goes DIRECT to `target` above.
+	states.Get("intercept-host").SetSnapshot(health.Snapshot{Reachable: false, LastCheck: time.Now()})
+
+	var ca *mitm.CA
+	caGetter := func() (*mitm.CA, error) {
+		var err error
+		ca, err = mitm.LoadOrCreate(certPath, keyPath)
+		return ca, err
+	}
+
+	handler := proxy.NewHostHandler(cfgStore, states, "intercept-host", caGetter)
+	proxySrv := httptest.NewServer(handler)
+	defer proxySrv.Close()
+
+	rawConn, err := net.Dial("tcp", proxySrv.Listener.Addr().String())
+	if err != nil {
+		t.Fatalf("dial proxy: %v", err)
+	}
+	defer rawConn.Close()
+
+	fmt.Fprintf(rawConn, "CONNECT %s HTTP/1.1\r\nHost: %s\r\n\r\n", target, target)
+	connectResp, err := http.ReadResponse(bufio.NewReader(rawConn), &http.Request{Method: http.MethodConnect})
+	if err != nil {
+		t.Fatalf("read CONNECT response: %v", err)
+	}
+	if connectResp.StatusCode != http.StatusOK {
+		t.Fatalf("CONNECT status = %d, want 200", connectResp.StatusCode)
+	}
+
+	// caGetter runs synchronously inside CONNECT handling above (before the
+	// 200 is written), so `ca` is populated by now — build a pool that
+	// trusts it, exactly as a device would after installing
+	// /certs/dynamic-pac-proxy-ca.pem.
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.Certificate())
+
+	tlsConn := tls.Client(rawConn, &tls.Config{RootCAs: pool, ServerName: "localhost"})
+	if err := tlsConn.Handshake(); err != nil {
+		t.Fatalf("TLS handshake with the intercepting proxy failed: %v", err)
+	}
+
+	peerCert := tlsConn.ConnectionState().PeerCertificates[0]
+	if len(peerCert.DNSNames) != 1 || peerCert.DNSNames[0] != "localhost" {
+		t.Fatalf("issued leaf certificate DNSNames = %v, want [localhost]", peerCert.DNSNames)
+	}
+
+	fmt.Fprintf(tlsConn, "GET /some/path HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", target)
+	httpResp, err := http.ReadResponse(bufio.NewReader(tlsConn), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read decrypted response: %v", err)
+	}
+	if httpResp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502 (nothing is listening at %s)", httpResp.StatusCode, target)
+	}
 }

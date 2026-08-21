@@ -6,6 +6,82 @@ import (
 	"github.com/derekhud/dynamic-pac-proxy/internal/config"
 )
 
+func baseFileConfig(h config.HostConfig) config.FileConfig {
+	return config.FileConfig{
+		ListenAddr:      ":8080",
+		RefreshInterval: config.Duration(1),
+		MDNSTimeout:     config.Duration(1),
+		DialTimeout:     config.Duration(1),
+		FailureCooldown: config.Duration(1),
+		Hosts:           []config.HostConfig{h},
+	}
+}
+
+func TestValidateConfigHostIdentity(t *testing.T) {
+	valid := config.HostConfig{Name: "host", HostPort: 8888, ServerPort: 8081}
+
+	cases := []struct {
+		name    string
+		host    config.HostConfig
+		wantErr bool
+	}{
+		{
+			name: "host_name alone is valid",
+			host: func() config.HostConfig { h := valid; h.HostName = "some-machine.local"; return h }(),
+		},
+		{
+			name: "host_ip alone is valid",
+			host: func() config.HostConfig { h := valid; h.HostIP = "172.16.2.23"; return h }(),
+		},
+		{
+			name:    "neither set is invalid",
+			host:    valid,
+			wantErr: true,
+		},
+		{
+			name: "both set is invalid",
+			host: func() config.HostConfig {
+				h := valid
+				h.HostName = "some-machine.local"
+				h.HostIP = "172.16.2.23"
+				return h
+			}(),
+			wantErr: true,
+		},
+		{
+			name:    "invalid host_ip is rejected",
+			host:    func() config.HostConfig { h := valid; h.HostIP = "not-an-ip"; return h }(),
+			wantErr: true,
+		},
+		{
+			name:    "host_ip accepts IPv6",
+			host:    func() config.HostConfig { h := valid; h.HostIP = "::1"; return h }(),
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := config.ValidateConfig(baseFileConfig(tc.host))
+			if tc.wantErr && err == nil {
+				t.Fatal("expected an error, got nil")
+			}
+			if !tc.wantErr && err != nil {
+				t.Fatalf("expected no error, got: %v", err)
+			}
+		})
+	}
+}
+
+func TestHostConfigTarget(t *testing.T) {
+	if got := (config.HostConfig{HostName: "some-machine.local"}).Target(); got != "some-machine.local" {
+		t.Fatalf("Target() = %q, want host_name value", got)
+	}
+	if got := (config.HostConfig{HostIP: "172.16.2.23"}).Target(); got != "172.16.2.23" {
+		t.Fatalf("Target() = %q, want host_ip value", got)
+	}
+}
+
 func TestResolveCertsDir(t *testing.T) {
 	cases := []struct {
 		name       string

@@ -16,20 +16,20 @@ import (
 // BuildPAC always points at this box's own fixed address for the host —
 // reachability of the upstream (Charles) is now handled transparently by
 // the forward proxy itself, per-request, so the PAC never needs to change.
-func BuildPAC(advertiseHost string, listenPort int) string {
+func BuildPAC(advertiseHost string, serverPort int) string {
 	if advertiseHost == "" {
 		return "// advertise_host is not set in config.yaml — set it to this box's\n" +
 			"// LAN IP or hostname (reachable by your devices), then re-fetch this URL.\n" +
 			"function FindProxyForURL(url, host) {\n    return \"DIRECT\";\n}\n"
 	}
-	return fmt.Sprintf("function FindProxyForURL(url, host) {\n    return \"PROXY %s:%d; DIRECT\";\n}\n", advertiseHost, listenPort)
+	return fmt.Sprintf("function FindProxyForURL(url, host) {\n    return \"PROXY %s:%d; DIRECT\";\n}\n", advertiseHost, serverPort)
 }
 
 type HostStatus struct {
 	Name       string  `json:"name"`
 	Hostname   string  `json:"hostname"`
-	Port       int     `json:"port"`
-	ListenPort int     `json:"listen_port"`
+	HostPort   int     `json:"host_port"`
+	ServerPort int     `json:"server_port"`
 	ResolvedIP *string `json:"resolved_ip"`
 	Reachable  bool    `json:"reachable"`
 	LastCheck  string  `json:"last_check"`
@@ -47,9 +47,9 @@ func WriteStatusJSON(w http.ResponseWriter, cfg config.FileConfig, states *healt
 
 		hs := HostStatus{
 			Name:       h.Name,
-			Hostname:   h.MDNSHostname,
-			Port:       h.Port,
-			ListenPort: h.ListenPort,
+			Hostname:   h.Target(),
+			HostPort:   h.HostPort,
+			ServerPort: h.ServerPort,
 			Reachable:  snap.Reachable,
 			Error:      snap.LastError,
 		}

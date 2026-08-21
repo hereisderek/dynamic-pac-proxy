@@ -1,8 +1,10 @@
 # dynamic-pac-proxy
 
 Small Go service for a homelab LXC container that sits in front of Charles
-(or any HTTP(S) proxy) running on a machine whose IP moves around — found
-via mDNS/Bonjour (e.g. `dereks-MacBook-Pro.local`).
+(or any HTTP(S) proxy, e.g. [mitmproxy](https://mitmproxy.org)) running on
+a machine whose IP moves around — found via mDNS/Bonjour (e.g.
+`dereks-MacBook-Pro.local`), or at a fixed `host_ip` for a machine that
+already has a static address.
 
 Each configured host gets its own **fixed** listening port on this box.
 Devices point their proxy settings at that fixed address once, forever —
@@ -15,7 +17,7 @@ box, which makes the online/offline call itself, per request, in real time.
 
 ## How it works
 
-- Each host in `hosts:` gets a dedicated `listen_port` on this box. A
+- Each host in `hosts:` gets a dedicated `server_port` on this box. A
   request arriving on that port is handled as a real forward proxy:
   - **CONNECT** (HTTPS): the client connection is hijacked, an upstream
     tunnel is established — chained through Charles with our own CONNECT
@@ -41,8 +43,11 @@ box, which makes the online/offline call itself, per request, in real time.
 - A separate poll (every 3s, fixed) checks the config file's mtime and
   hot-reloads it on change, starting/stopping/rebinding each host's
   listener as hosts are added/removed/changed — see "Configuration" below.
+- `GET /` — a page listing every configured host's PAC URL and manual
+  proxy address, so you don't have to construct them by hand — see
+  "Point a device at it" below.
 - `GET /proxy/<name>.pac` — a PAC file pointing at this box's own fixed
-  `advertise_host:listen_port` for that host. Static: it never needs to
+  `advertise_host:server_port` for that host. Static: it never needs to
   change, since reachability is handled behind it, not by it.
 - `GET /status` — JSON array, one entry per host, with its last resolved
   IP, reachability, and last error. Querying it also counts as "a request
@@ -64,10 +69,11 @@ internal/
   health/             lazy TTL-gated reachability cache
   proxy/               the forward-proxy handler + per-host listener manager
   mdns/               raw mDNS (RFC 6762) A-record resolver
+  mitm/               this tool's own local CA + per-host leaf cert issuance
   webui/              /proxy/<name>.pac, /status, /certs
   install/            --install/--uninstall (systemd/OpenRC)
 tests/
-  config/, health/, proxy/, webui/   one test package per internal/ package
+  config/, health/, proxy/, webui/, mitm/   one test package per internal/ package
 deploy/               example config.yaml + systemd/OpenRC/OpenWRT unit files
 openwrt/              self-contained OpenWRT UCI+LuCI package (see its own README)
 certs/                drop your exported Charles root certificate here
@@ -133,26 +139,31 @@ failure_cooldown: 5s
 
 hosts:
   - name: derek-macbook
-    mdns_hostname: dereks-MacBook-Pro.local
-    port: 8888        # Charles's port on that Mac
-    listen_port: 8081  # THIS box's fixed port for that host
+    host_name: dereks-MacBook-Pro.local
+    host_port: 8888    # Charles's port on that Mac
+    server_port: 8081  # THIS box's fixed port for that host
 
   - name: office-pc
-    mdns_hostname: office-desktop.local
-    port: 9999
-    listen_port: 8082
+    host_name: office-desktop.local
+    host_port: 9999
+    server_port: 8082
     refresh_interval: 5s   # optional per-host override
     dial_timeout: 500ms    # optional per-host override
+
+  - name: mitmproxy-box
+    host_ip: "172.16.2.23"   # fixed IP instead of host_name — see below
+    host_port: 8080
+    server_port: 8083
 ```
 
 Top-level fields:
 
 | Field              | Default          | Meaning                                              |
 |---------------------|------------------|----------------------------------------------------|
-| `listen_addr`       | `:8080`          | Where the HTTP status/PAC server listens (not the proxy ports — see `listen_port` below) |
+| `listen_addr`       | `:8080`          | Where the HTTP status/PAC server listens (not the proxy ports — see `server_port` below) |
 | `advertise_host`    | auto-detected LAN IP | The address baked into PAC files at `/proxy/<name>.pac`; set explicitly if the auto-detected guess isn't what devices can actually reach (e.g. multi-homed box) |
 | `refresh_interval`  | `15s`            | Default health-check cache TTL for hosts that don't override it |
-| `mdns_timeout`      | `2s`             | Default mDNS reply timeout for hosts that don't override |
+| `mdns_timeout`      | `2s`             | Default mDNS reply timeout for hosts that don't override (unused for `host_ip` hosts — nothing to resolve) |
 | `dial_timeout`      | `1s`             | Default TCP dial timeout for hosts that don't override |
 | `failure_cooldown`  | `5s`             | Default minimum spacing between failure-triggered early rechecks, for hosts that don't override |
 | `certs_dir`         | a `certs` folder next to `config.yaml` | Directory served at `/certs` for downloading/installing Charles's SSL certificate — see "SSL certificates" below |
@@ -163,19 +174,21 @@ Each entry in `hosts`:
 | Field              | Required | Meaning                                                |
 |---------------------|----------|-----------------------------------------------------------|
 | `name`              | yes      | Identifier used in URLs/status (`[a-zA-Z0-9_-]+`, unique)|
-| `mdns_hostname`     | yes      | Bonjour hostname to resolve, e.g. `some-machine.local`   |
-| `port`              | yes      | The port Charles (or whatever proxy) listens on, on that resolved host |
-| `listen_port`       | yes      | The fixed port **this box** listens on for this host — point devices here. Must be unique across hosts and different from `listen_addr`'s port |
+| `host_name`         | one of these two | Bonjour hostname to resolve, e.g. `some-machine.local` |
+| `host_ip`           | one of these two | Fixed IP instead of a Bonjour hostname — skips mDNS resolution entirely. Use this for a machine with a static/reserved address, or one that doesn't answer mDNS at all (e.g. a [mitmproxy](https://mitmproxy.org) instance) |
+| `host_port`         | yes      | The port Charles (or whatever proxy) listens on, on that host |
+| `server_port`       | yes      | The fixed port **this box** listens on for this host — point devices here. Must be unique across hosts and different from `listen_addr`'s port |
 | `refresh_interval`  | no       | Overrides the top-level default for this host only       |
 | `mdns_timeout`      | no       | Overrides the top-level default for this host only       |
 | `dial_timeout`      | no       | Overrides the top-level default for this host only       |
 | `failure_cooldown`  | no       | Overrides the top-level default for this host only       |
+| `intercept_ssl`     | no       | Terminate HTTPS at this box instead of tunneling it opaquely — see "SSL interception" below. Default `false` |
 
 **Hot reload:** editing `hosts` (adding, removing, or changing any host's
 settings), or the top-level defaults, takes effect within a few seconds
 automatically — no restart needed. Adding a host starts a new proxy
 listener for it; removing one stops its listener and drops it from
-`/status`; changing `listen_port` rebinds it to the new port. Only the
+`/status`; changing `server_port` rebinds it to the new port. Only the
 top-level `listen_addr` (the status/PAC server, not the per-host proxy
 ports) needs a restart to take effect — see "Deploy as an auto-start
 service" below.
@@ -183,11 +196,11 @@ service" below.
 If the config file doesn't exist at startup, the service runs with a
 single built-in default host and logs that it did so. If the file exists
 but fails to parse or validate at startup (e.g. a duplicate `name`, a
-`port`/`listen_port` out of range, a `listen_port` collision between two
-hosts or with `listen_addr`, an empty `hosts` list), the service refuses
-to start — fail fast rather than run with an unintended config. Once
-running, a bad edit (e.g. a YAML typo) is logged and ignored — the service
-keeps using the last known-good config instead of crashing.
+`host_port`/`server_port` out of range, a `server_port` collision between
+two hosts or with `listen_addr`, an empty `hosts` list), the service
+refuses to start — fail fast rather than run with an unintended config.
+Once running, a bad edit (e.g. a YAML typo) is logged and ignored — the
+service keeps using the last known-good config instead of crashing.
 
 ## Deploy as an auto-start service
 
@@ -354,7 +367,7 @@ ssh root@<router> 'service dynamic-pac-proxy status; logread | grep dynamic-pac-
 If devices on the LAN can't reach the proxy port, check the firewall zone
 the router's LAN interface is in — `uci show firewall` — the default LAN
 zone's input policy is normally `ACCEPT`, but a hardened config may need
-an explicit rule opening the `listen_addr`/`listen_port`s to the LAN zone.
+an explicit rule opening the `listen_addr`/`server_port`s to the LAN zone.
 
 #### Anything else
 
@@ -383,18 +396,23 @@ segment. Running it in an LXC container needs that container's NIC
 bridged onto the same L2/VLAN as your Mac (the typical Proxmox `vmbr0`
 setup) — if the container is instead behind NAT (e.g. a separate routed
 subnet), multicast won't reach it and resolution will fail. In that case
-you'd need an mDNS reflector/repeater on the network, or switch to a
-static IP / DHCP reservation for the Mac instead of hostname resolution.
+you'd need an mDNS reflector/repeater on the network, or sidestep mDNS
+entirely for that host by giving it a static IP / DHCP reservation and
+using `host_ip` instead of `host_name` in its config entry.
 
 ## Point a device at it
 
-Either configure the device's proxy manually with `advertise_host:listen_port`
+Either configure the device's proxy manually with `advertise_host:server_port`
 (e.g. `192.168.1.50:8081`), or use "Automatic Proxy Configuration" / PAC URL
 pointed at:
 
 ```
 http://<lxc-host-ip>:8080/proxy/<name>.pac
 ```
+
+Visit `http://<lxc-host-ip>:8080/` for a page listing both of these,
+already filled in, for every configured host — no need to construct
+either URL by hand or remember each host's `server_port`.
 
 Either way, this is a one-time setup: the address never needs to be
 re-fetched or changed. Whether Charles is currently reachable is decided
@@ -411,6 +429,11 @@ target's:
 host "derek-macbook": GET http://example.com/ from 192.168.1.42 -> chained via 192.168.1.30:8888
 host "derek-macbook": CONNECT example.com:443 from 192.168.1.42 -> chained
 ```
+
+With `intercept_ssl` enabled for a host (see "SSL interception" below),
+the CONNECT line above becomes a real request line with the actual path —
+`GET https://example.com/some/page from 192.168.1.42 -> DIRECT` — instead
+of just the bare `host:443` a plain tunnel can see.
 
 This works because devices are configured to talk straight to this box
 (per the PAC/manual proxy setup above) — `r.RemoteAddr` on every request is
@@ -442,3 +465,53 @@ request, so dropping in a new certificate doesn't need a restart.
 
 Check `http://<lxc-host-ip>:8080/status` any time to see what each
 configured host currently resolved to and whether it's reachable.
+
+## SSL interception
+
+Set `intercept_ssl: true` on a host to have **this tool** terminate HTTPS
+for it, instead of tunneling opaque encrypted bytes end to end:
+
+1. When a client CONNECTs for that host, this box presents its own
+   certificate for the requested domain — issued on the fly, signed by
+   dynamic-pac-proxy's own local CA ("Dynamic PAC Proxy Local CA") — and
+   completes the TLS handshake with the client itself.
+2. With the traffic now decrypted, the real HTTP request (method, full
+   path, headers) goes through the exact same chained-vs-DIRECT logic as
+   plain HTTP requests — see "How it works" — which means access logging
+   now shows the real URL for HTTPS traffic too, not just the CONNECT
+   `host:443`.
+3. It's then re-encrypted over a brand new, real TLS connection to
+   whatever it's forwarded to (chained through Charles's own CONNECT, or
+   straight to the real destination) — nothing between this box and the
+   real destination ever goes out in the clear.
+
+For this to work, every client device needs to install and trust this
+tool's own CA — its public certificate is generated automatically (once,
+on first use of `intercept_ssl` anywhere) and shows up on the `/certs`
+page alongside any Charles certificate you've dropped in, as
+`dynamic-pac-proxy-ca.pem`; see `certs/README.md`. The matching private
+key is written next to `config.yaml` (never under `certs/`, never served)
+— back it up along with your config if you don't want every device to
+need re-trusting after a fresh install.
+
+**Caveats:**
+
+- Nothing is generated or touched on disk until some host actually needs
+  it — same lazy-on-first-use design as the health checks.
+- The client-facing side only speaks HTTP/1.1 (no HTTP/2) — this tool
+  doesn't offer `h2` in its ALPN response, so browsers negotiate HTTP/1.1
+  with it instead. The upstream/outbound leg is unaffected by this.
+- If a host has both `intercept_ssl: true` *and* Charles's own SSL
+  Proxying enabled for the same domain, you'll get a double interception:
+  this tool decrypts first, then re-encrypts a fresh TLS connection that
+  gets tunneled through Charles via CONNECT — at which point Charles's own
+  SSL Proxying would try to intercept *that* connection too, presenting
+  *its* certificate to this tool's outbound request. This tool doesn't
+  trust Charles's CA for outbound connections (only the system's normal
+  roots), so that combination will fail with a certificate error. Use one
+  or the other for a given host, not both.
+- A destination with its own self-signed/private certificate (not signed
+  by a public or system-trusted CA) will fail the same way any HTTPS
+  client would — this tool verifies the real destination's certificate
+  against the normal system trust store on the outbound leg; it doesn't
+  weaken that check.
