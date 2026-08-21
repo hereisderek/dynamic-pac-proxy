@@ -76,6 +76,8 @@ func main() {
 
 	mux := http.NewServeMux()
 
+	mux.Handle("/", webui.IndexHandler(cfgStore))
+
 	mux.HandleFunc("/proxy/", func(w http.ResponseWriter, r *http.Request) {
 		name := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/proxy/"), ".pac")
 		if name == "" || !strings.HasSuffix(r.URL.Path, ".pac") {

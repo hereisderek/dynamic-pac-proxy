@@ -144,6 +144,13 @@ packages).
   is-installed certificate for whatever domain the client is asking for.
 - **`internal/webui`** — the auxiliary HTTP endpoints, as opposed to the
   per-host proxy ports in `internal/proxy`:
+  - `index.go`: `IndexHandler` serves `/` — one entry per host with its
+    PAC URL and manual `advertise_host:listen_port` address, built from
+    `config.PortFromAddr(cfg.ListenAddr)` plus `HostConfig.Target()`. It
+    only matches the exact root path itself and 404s otherwise, since
+    `http.ServeMux` treats a registered `"/"` as a catch-all for every
+    unmatched path — without that check, a typo'd URL would silently
+    render this page instead of 404ing.
   - `pac.go`: `BuildPAC` is static: always
     `PROXY advertise_host:listen_port; DIRECT`. `WriteStatusJSON` also
     forces a fresh health check per host when called — hitting `/status`

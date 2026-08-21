@@ -176,8 +176,9 @@ func detectLANAddress() string {
 	return ""
 }
 
-// portFromAddr extracts the numeric port from a "host:port" listen address.
-func portFromAddr(addr string) (int, bool) {
+// PortFromAddr extracts the numeric port from a "host:port" listen address
+// — e.g. turning listen_addr into the port PAC URLs should point at.
+func PortFromAddr(addr string) (int, bool) {
 	_, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		return 0, false
@@ -194,7 +195,7 @@ func ValidateConfig(cfg FileConfig) error {
 		return fmt.Errorf("hosts: at least one host must be configured")
 	}
 
-	listenAddrPort, _ := portFromAddr(cfg.ListenAddr)
+	listenAddrPort, _ := PortFromAddr(cfg.ListenAddr)
 
 	seenNames := make(map[string]bool, len(cfg.Hosts))
 	seenPorts := make(map[int]string, len(cfg.Hosts))

@@ -43,6 +43,9 @@ box, which makes the online/offline call itself, per request, in real time.
 - A separate poll (every 3s, fixed) checks the config file's mtime and
   hot-reloads it on change, starting/stopping/rebinding each host's
   listener as hosts are added/removed/changed — see "Configuration" below.
+- `GET /` — a page listing every configured host's PAC URL and manual
+  proxy address, so you don't have to construct them by hand — see
+  "Point a device at it" below.
 - `GET /proxy/<name>.pac` — a PAC file pointing at this box's own fixed
   `advertise_host:listen_port` for that host. Static: it never needs to
   change, since reachability is handled behind it, not by it.
@@ -406,6 +409,10 @@ pointed at:
 ```
 http://<lxc-host-ip>:8080/proxy/<name>.pac
 ```
+
+Visit `http://<lxc-host-ip>:8080/` for a page listing both of these,
+already filled in, for every configured host — no need to construct
+either URL by hand or remember each host's `listen_port`.
 
 Either way, this is a one-time setup: the address never needs to be
 re-fetched or changed. Whether Charles is currently reachable is decided
