@@ -52,6 +52,39 @@ func TestLoadOrCreateGeneratesAndPersists(t *testing.T) {
 	}
 }
 
+// TestLoadOrCreateDoesNotRegenerateOnCorruptFile guards against silently
+// minting (and persisting) a brand new CA over a corrupted or otherwise
+// unreadable one — that would invalidate trust already installed on
+// client devices with no indication anything went wrong. Regeneration
+// must be reserved for "doesn't exist yet" and "expired".
+func TestLoadOrCreateDoesNotRegenerateOnCorruptFile(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "ca.pem")
+	keyPath := filepath.Join(dir, "ca-key.pem")
+
+	// A real key, but garbage in place of the certificate — e.g. a
+	// truncated write or on-disk corruption, not a missing file.
+	if _, err := mitm.LoadOrCreate(certPath, keyPath); err != nil {
+		t.Fatalf("seed LoadOrCreate: %v", err)
+	}
+	corruptBytes := []byte("this is not a valid PEM certificate")
+	if err := os.WriteFile(certPath, corruptBytes, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mitm.LoadOrCreate(certPath, keyPath); err == nil {
+		t.Fatal("expected LoadOrCreate to fail on a corrupted cert file, not silently regenerate")
+	}
+
+	stillCorrupt, err := os.ReadFile(certPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(stillCorrupt) != string(corruptBytes) {
+		t.Fatal("expected the corrupted cert file to be left untouched, not overwritten by a freshly minted CA")
+	}
+}
+
 func TestLeafCertificateSignedByCAAndCached(t *testing.T) {
 	dir := t.TempDir()
 	ca, err := mitm.LoadOrCreate(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem"))

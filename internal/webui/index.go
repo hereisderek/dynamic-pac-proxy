@@ -3,6 +3,7 @@ package webui
 import (
 	"fmt"
 	"html/template"
+	"log"
 	"net/http"
 
 	"github.com/derekhud/dynamic-pac-proxy/internal/config"
@@ -44,7 +45,7 @@ below, or configure its proxy manually with the matching address.</p>
   <div class="name">{{.Name}}</div>
   <div class="url">PAC: <a href="{{.PACPath}}"><code>{{.PACURL}}</code></a></div>
   <div class="url">Manual: <code>{{.ManualAddr}}</code></div>
-  <div class="meta">forwards to {{.Target}}:{{.Port}}{{if .InterceptSSL}} · SSL interception enabled{{end}}</div>
+  <div class="meta">forwards to {{.Target}}:{{.HostPort}}{{if .InterceptSSL}} · SSL interception enabled{{end}}</div>
 </li>
 {{end}}
 </ul>
@@ -63,7 +64,7 @@ type indexHost struct {
 	PACURL       string
 	ManualAddr   string
 	Target       string
-	Port         int
+	HostPort     int
 	InterceptSSL bool
 }
 
@@ -80,16 +81,21 @@ func IndexHandler(cfgStore *config.Store) http.Handler {
 		}
 
 		cfg := cfgStore.Snapshot()
-		port, _ := config.PortFromAddr(cfg.ListenAddr)
+		port, portOK := config.PortFromAddr(cfg.ListenAddr)
+		if !portOK {
+			log.Printf("index: could not parse a port out of listen_addr %q; PAC links will stay relative", cfg.ListenAddr)
+		}
 
 		hosts := make([]indexHost, 0, len(cfg.Hosts))
 		for _, h := range cfg.Hosts {
 			pacPath := fmt.Sprintf("/proxy/%s.pac", h.Name)
 			pacURL := pacPath
-			manualAddr := fmt.Sprintf("(set advertise_host in config.yaml):%d", h.ListenPort)
+			manualAddr := fmt.Sprintf("(set advertise_host in config.yaml):%d", h.ServerPort)
 			if cfg.AdvertiseHost != "" {
-				pacURL = fmt.Sprintf("http://%s:%d%s", cfg.AdvertiseHost, port, pacPath)
-				manualAddr = fmt.Sprintf("%s:%d", cfg.AdvertiseHost, h.ListenPort)
+				manualAddr = fmt.Sprintf("%s:%d", cfg.AdvertiseHost, h.ServerPort)
+				if portOK {
+					pacURL = fmt.Sprintf("http://%s:%d%s", cfg.AdvertiseHost, port, pacPath)
+				}
 			}
 			hosts = append(hosts, indexHost{
 				Name:         h.Name,
@@ -97,12 +103,14 @@ func IndexHandler(cfgStore *config.Store) http.Handler {
 				PACURL:       pacURL,
 				ManualAddr:   manualAddr,
 				Target:       h.Target(),
-				Port:         h.Port,
+				HostPort:     h.HostPort,
 				InterceptSSL: h.InterceptSSL,
 			})
 		}
 
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		indexTemplate.Execute(w, struct{ Hosts []indexHost }{Hosts: hosts})
+		if err := indexTemplate.Execute(w, struct{ Hosts []indexHost }{Hosts: hosts}); err != nil {
+			log.Printf("index: template execution failed: %v", err)
+		}
 	})
 }

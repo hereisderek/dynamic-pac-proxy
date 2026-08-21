@@ -98,7 +98,7 @@ func newProxyHandler(cfgStore *config.Store, states *health.StateStore, hostName
 
 		dec := &upstreamDecision{}
 		if snap.Reachable {
-			dec.proxyURL = &url.URL{Scheme: "http", Host: net.JoinHostPort(snap.IP.String(), strconv.Itoa(snap.Port))}
+			dec.proxyURL = &url.URL{Scheme: "http", Host: net.JoinHostPort(snap.IP.String(), strconv.Itoa(snap.HostPort))}
 		}
 		log.Printf("host %q: %s %s from %s -> %s", hostName, r.Method, r.URL, clientIP(r), pathLabel(dec.proxyURL))
 		r = r.WithContext(context.WithValue(r.Context(), upstreamDecisionKey{}, dec))
@@ -161,7 +161,7 @@ func handleConnectTunnel(w http.ResponseWriter, r *http.Request, cfgStore *confi
 	var upstream net.Conn
 	chained := false
 	if snap.Reachable {
-		conn, err := chainedConnect(snap.IP.String(), snap.Port, r.Host, eff.DialTimeout)
+		conn, err := chainedConnect(snap.IP.String(), snap.HostPort, r.Host, eff.DialTimeout)
 		if err != nil {
 			log.Printf("host %q: chained CONNECT to %s via upstream failed, falling back to DIRECT: %v", hostName, r.Host, err)
 			reportUpstreamFailure(cfgStore, states, hostName)
@@ -186,11 +186,16 @@ func handleConnectTunnel(w http.ResponseWriter, r *http.Request, cfgStore *confi
 		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
 		return
 	}
-	client, _, err := hijacker.Hijack()
+	conn, bufrw, err := hijacker.Hijack()
 	if err != nil {
 		upstream.Close()
 		return
 	}
+	// bufrw.Reader may already hold bytes net/http read off the wire past
+	// the CONNECT request line (e.g. a pipelined ClientHello arriving in
+	// the same read as the request) — read through it, not the raw conn,
+	// or those bytes are silently lost and the tunnel breaks.
+	client := &bufferedConn{Conn: conn, r: bufrw.Reader}
 	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		client.Close()
 		upstream.Close()
@@ -219,10 +224,16 @@ func handleConnectIntercept(w http.ResponseWriter, r *http.Request, hostName str
 		http.Error(w, "hijacking not supported", http.StatusInternalServerError)
 		return
 	}
-	client, _, err := hijacker.Hijack()
+	conn, bufrw, err := hijacker.Hijack()
 	if err != nil {
 		return
 	}
+	// As in handleConnectTunnel: read through bufrw.Reader, not the raw
+	// conn, since it may already hold bytes read off the wire past the
+	// CONNECT request — a pipelined ClientHello sitting in that buffer
+	// would otherwise be invisible to tls.Server below and break the
+	// handshake.
+	client := &bufferedConn{Conn: conn, r: bufrw.Reader}
 	if _, err := client.Write([]byte("HTTP/1.1 200 Connection Established\r\n\r\n")); err != nil {
 		client.Close()
 		return
@@ -391,7 +402,7 @@ func (c *notifyOnCloseConn) Close() error {
 
 // runningHost is one host's live forward-proxy listener.
 type runningHost struct {
-	listenPort int
+	serverPort int
 	server     *http.Server
 }
 
@@ -401,9 +412,9 @@ type Manager struct {
 	cfgStore *config.Store
 	states   *health.StateStore
 
-	caOnce sync.Once
-	ca     *mitm.CA
-	caErr  error
+	caMu      sync.Mutex
+	ca        *mitm.CA
+	caCertDir string // certs dir the CA's public cert was last published to
 
 	mu      sync.Mutex
 	running map[string]*runningHost
@@ -422,23 +433,49 @@ func NewManager(cfgStore *config.Store, states *health.StateStore) *Manager {
 // Nothing touches disk unless intercept_ssl is actually used at least
 // once — same "don't do work nobody asked for yet" spirit as the health
 // cache in the health package.
+//
+// Deliberately not a sync.Once: that would cache a transient failure
+// (e.g. disk full at the time of the first CONNECT) forever, requiring a
+// full restart to retry. Once loaded, the CA itself is kept for the life
+// of the process — regenerating it would invalidate trust already
+// installed on client devices — but if certs_dir is hot-reloaded
+// afterward, its public cert is republished to the new location so it
+// doesn't just vanish from /certs.
 func (m *Manager) getCA() (*mitm.CA, error) {
-	m.caOnce.Do(func() {
-		certPath := filepath.Join(m.cfgStore.CertsDir(), mitm.CACertFileName)
-		keyPath := filepath.Join(m.cfgStore.ConfigDir(), mitm.CAKeyFileName)
-		m.ca, m.caErr = mitm.LoadOrCreate(certPath, keyPath)
-		if m.caErr != nil {
-			log.Printf("intercept_ssl: could not load or create the local CA: %v", m.caErr)
-		} else {
-			log.Printf("intercept_ssl: local CA ready (public cert at %s)", certPath)
+	m.caMu.Lock()
+	defer m.caMu.Unlock()
+
+	certsDir := m.cfgStore.CertsDir()
+
+	if m.ca != nil {
+		if certsDir != m.caCertDir {
+			certPath := filepath.Join(certsDir, mitm.CACertFileName)
+			if err := mitm.PublishCert(m.ca, certPath); err != nil {
+				log.Printf("intercept_ssl: could not republish the local CA cert to %s after certs_dir changed: %v", certPath, err)
+			} else {
+				m.caCertDir = certsDir
+				log.Printf("intercept_ssl: republished local CA cert to %s after certs_dir changed", certPath)
+			}
 		}
-	})
-	return m.ca, m.caErr
+		return m.ca, nil
+	}
+
+	certPath := filepath.Join(certsDir, mitm.CACertFileName)
+	keyPath := filepath.Join(m.cfgStore.ConfigDir(), mitm.CAKeyFileName)
+	ca, err := mitm.LoadOrCreate(certPath, keyPath)
+	if err != nil {
+		log.Printf("intercept_ssl: could not load or create the local CA: %v", err)
+		return nil, err
+	}
+	m.ca = ca
+	m.caCertDir = certsDir
+	log.Printf("intercept_ssl: local CA ready (public cert at %s)", certPath)
+	return ca, nil
 }
 
 // Reconcile starts a listener for any host in the current config that
 // doesn't have one, stops listeners for hosts no longer present, and
-// rebinds any whose listen_port changed. Safe to call repeatedly.
+// rebinds any whose server_port changed. Safe to call repeatedly.
 func (m *Manager) Reconcile() {
 	cfg := m.cfgStore.Snapshot()
 	wanted := make(map[string]config.HostConfig, len(cfg.Hosts))
@@ -455,8 +492,8 @@ func (m *Manager) Reconcile() {
 			m.stopLocked(name, rh, "removed from config")
 			continue
 		}
-		if h.ListenPort != rh.listenPort {
-			m.stopLocked(name, rh, fmt.Sprintf("listen_port changed to %d", h.ListenPort))
+		if h.ServerPort != rh.serverPort {
+			m.stopLocked(name, rh, fmt.Sprintf("server_port changed to %d", h.ServerPort))
 			m.startLocked(name, h)
 		}
 	}
@@ -472,22 +509,22 @@ func (m *Manager) stopLocked(name string, rh *runningHost, reason string) {
 	go rh.server.Close()
 	delete(m.running, name)
 	m.states.Remove(name)
-	log.Printf("host %q: stopped listening on :%d (%s)", name, rh.listenPort, reason)
+	log.Printf("host %q: stopped listening on :%d (%s)", name, rh.serverPort, reason)
 }
 
 func (m *Manager) startLocked(name string, h config.HostConfig) {
-	addr := fmt.Sprintf(":%d", h.ListenPort)
+	addr := fmt.Sprintf(":%d", h.ServerPort)
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		log.Printf("host %q: could not listen on %s: %v", name, addr, err)
 		return
 	}
 	srv := &http.Server{Handler: NewHostHandler(m.cfgStore, m.states, name, m.getCA)}
-	m.running[name] = &runningHost{listenPort: h.ListenPort, server: srv}
+	m.running[name] = &runningHost{serverPort: h.ServerPort, server: srv}
 	go func() {
 		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
 			log.Printf("host %q: proxy server on %s exited: %v", name, addr, err)
 		}
 	}()
-	log.Printf("host %q: proxying on %s -> %s:%d (falls back to DIRECT if unreachable)", name, addr, h.Target(), h.Port)
+	log.Printf("host %q: proxying on %s -> %s:%d (falls back to DIRECT if unreachable)", name, addr, h.Target(), h.HostPort)
 }

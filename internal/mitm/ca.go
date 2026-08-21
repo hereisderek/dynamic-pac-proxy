@@ -15,6 +15,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
+	"errors"
 	"fmt"
 	"math/big"
 	"os"
@@ -56,26 +57,45 @@ type CA struct {
 	cache map[string]*tls.Certificate
 }
 
+// errRegenerate marks the only two load() failures that should trigger
+// create() minting a fresh CA: the files simply don't exist yet, or the
+// existing CA has expired. Any other failure (corrupt PEM, an unreadable
+// key, a permissions problem, a partial write) is returned as-is by
+// LoadOrCreate instead — silently regenerating on those would overwrite a
+// CA that may already be trusted on client devices, with no indication
+// anything went wrong.
+var errRegenerate = errors.New("mitm: CA missing or expired")
+
 // LoadOrCreate loads an existing CA from certPath/keyPath if both are
 // present, parse, and not expired, or generates a fresh CA and writes it
 // to those paths otherwise. certPath ends up served publicly (under
 // /certs) so users can install/trust it; keyPath must never be served —
 // it's the CA's private signing key.
 func LoadOrCreate(certPath, keyPath string) (*CA, error) {
-	if ca, err := load(certPath, keyPath); err == nil {
+	ca, err := load(certPath, keyPath)
+	if err == nil {
 		return ca, nil
 	}
-	return create(certPath, keyPath)
+	if errors.Is(err, errRegenerate) {
+		return create(certPath, keyPath)
+	}
+	return nil, fmt.Errorf("load local CA: %w", err)
 }
 
 func load(certPath, keyPath string) (*CA, error) {
 	certPEM, err := os.ReadFile(certPath)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%s: %w", certPath, errRegenerate)
+		}
+		return nil, fmt.Errorf("read %s: %w", certPath, err)
 	}
 	keyPEM, err := os.ReadFile(keyPath)
 	if err != nil {
-		return nil, err
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("%s: %w", keyPath, errRegenerate)
+		}
+		return nil, fmt.Errorf("read %s: %w", keyPath, err)
 	}
 
 	certBlock, _ := pem.Decode(certPEM)
@@ -87,7 +107,7 @@ func load(certPath, keyPath string) (*CA, error) {
 		return nil, fmt.Errorf("%s: %w", certPath, err)
 	}
 	if time.Now().After(cert.NotAfter) {
-		return nil, fmt.Errorf("%s: expired", certPath)
+		return nil, fmt.Errorf("%s: expired: %w", certPath, errRegenerate)
 	}
 
 	keyBlock, _ := pem.Decode(keyPEM)
@@ -144,6 +164,13 @@ func create(certPath, keyPath string) (*CA, error) {
 	return &CA{cert: cert, key: key, cache: make(map[string]*tls.Certificate)}, nil
 }
 
+// writePEM writes a PEM-encoded file with the given permissions. perm is
+// only honored by OpenFile when it actually creates the file — if path
+// already exists (e.g. an expired CA being regenerated), OpenFile reuses
+// its current mode regardless of perm, so it's chmod'd explicitly too.
+// That matters most for the private key: it must never end up
+// group/world-readable just because the file happened to pre-exist with a
+// looser mode.
 func writePEM(path, blockType string, der []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("create %s: %w", filepath.Dir(path), err)
@@ -153,6 +180,9 @@ func writePEM(path, blockType string, der []byte, perm os.FileMode) error {
 		return fmt.Errorf("write %s: %w", path, err)
 	}
 	defer f.Close()
+	if err := f.Chmod(perm); err != nil {
+		return fmt.Errorf("chmod %s: %w", path, err)
+	}
 	return pem.Encode(f, &pem.Block{Type: blockType, Bytes: der})
 }
 
@@ -205,6 +235,15 @@ func (ca *CA) LeafCertificate(hostname string) (*tls.Certificate, error) {
 // leaf certificate chains up to it, or to inspect its fields.
 func (ca *CA) Certificate() *x509.Certificate {
 	return ca.cert
+}
+
+// PublishCert (re-)writes ca's public certificate to certPath — used to
+// move an already-loaded CA's public cert to a new location after
+// certs_dir is hot-reloaded, without regenerating the CA (and so without
+// invalidating trust already installed on client devices) or touching the
+// private key at all.
+func PublishCert(ca *CA, certPath string) error {
+	return writePEM(certPath, "CERTIFICATE", ca.cert.Raw, 0o644)
 }
 
 // CertificateFor implements the logic behind tls.Config.GetCertificate:
