@@ -64,13 +64,18 @@ packages).
   `HostConfig.InterceptSSL` (`intercept_ssl` in YAML) is read straight off
   the live config on every CONNECT rather than merged into
   `EffectiveHost`, since it has no top-level default to inherit — see
-  `internal/proxy`.
+  `internal/proxy`. Each host identifies its target with exactly one of
+  `MDNSHostname` or `HostIP` (`ValidateConfig` rejects both-set and
+  neither-set); `HostConfig.Target()` returns whichever is set, for
+  display (logs, `/status`) — see `internal/health` for where the actual
+  branch (resolve vs. skip straight to dialing) happens.
 - **`internal/health`** — a **lazy, TTL-gated** reachability cache.
-  `State.GetFresh()` only does a real mDNS resolve + TCP dial
-  (`checkHost()`) when the cached `Snapshot` is older than that host's
-  `refresh_interval`; concurrent callers on a stale cache are coalesced
-  onto one check via `checkMu`, not one each. There is deliberately no
-  background polling ticker per host. `State.ReportFailure()` is the other
+  `State.GetFresh()` only does a real resolve (mDNS, or none at all when
+  `EffectiveHost.HostIP` is set — `checkHost()` skips straight to
+  `net.ParseIP` and the TCP dial) + TCP dial when the cached `Snapshot` is
+  older than that host's `refresh_interval`; concurrent callers on a stale
+  cache are coalesced onto one check via `checkMu`, not one each. There is
+  deliberately no background polling ticker per host. `State.ReportFailure()` is the other
   way a check gets triggered early: when a request actually fails on the
   chained path, it invalidates the cache (zeroes `LastCheck`) so the next
   request re-checks immediately instead of waiting out the rest of
@@ -198,6 +203,15 @@ should not accidentally regress it:
   hostname resolves via `127.0.0.1` without ever touching the network).
   This is a testing artifact when developing on the same Mac that's being
   resolved, not a bug in `ResolveA`.
+- **`host_ip` exists as an escape hatch, not a replacement for mDNS**:
+  added for hosts that either already have a fixed address (e.g. a
+  mitmproxy instance) or can't answer mDNS at all — and it happens to also
+  sidestep the "Important networking caveat" in README.md (multicast not
+  crossing an LXC's NAT/routed subnet) for a specific host, without
+  needing an mDNS reflector on the whole network. It's deliberately
+  exactly one extra field, not a second resolution mechanism living
+  alongside `mdns_hostname` with its own timeout/retry semantics —
+  `checkHost()` just skips resolution and dials the parsed IP directly.
 
 ## Current deployment
 

@@ -1,6 +1,7 @@
 package health_test
 
 import (
+	"net"
 	"testing"
 	"time"
 
@@ -74,5 +75,41 @@ func TestReportFailureCooldown(t *testing.T) {
 
 	if ok := hs.ReportFailure(cooldown); !ok {
 		t.Fatal("ReportFailure after the cooldown window elapsed should invalidate again")
+	}
+}
+
+// TestHostIPSkipsMDNS verifies a host configured with a fixed host_ip
+// never goes through mDNS resolution at all — proven by using a
+// deliberately long MDNSTimeout that a real check must NOT wait out.
+func TestHostIPSkipsMDNS(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := ln.Addr().(*net.TCPAddr).Port
+	ln.Close() // nothing listening: the dial itself should fail fast
+
+	eff := config.EffectiveHost{
+		Name:        "fixed-ip-host",
+		HostIP:      "127.0.0.1",
+		Port:        port,
+		MDNSTimeout: 5 * time.Second, // would dominate elapsed time if (wrongly) used
+		DialTimeout: time.Second,
+	}
+
+	hs := health.NewStateStore().Get("fixed-ip-host")
+
+	start := time.Now()
+	snap := hs.GetFresh(eff)
+	elapsed := time.Since(start)
+
+	if elapsed >= eff.MDNSTimeout {
+		t.Fatalf("check took %s, expected it to skip mDNS entirely for a host_ip host (MDNSTimeout=%s)", elapsed, eff.MDNSTimeout)
+	}
+	if snap.Hostname != "127.0.0.1" {
+		t.Fatalf("Snapshot.Hostname = %q, want the configured host_ip", snap.Hostname)
+	}
+	if snap.Reachable {
+		t.Fatal("expected unreachable: nothing is listening on the dialed port")
 	}
 }

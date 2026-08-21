@@ -489,5 +489,5 @@ func (m *Manager) startLocked(name string, h config.HostConfig) {
 			log.Printf("host %q: proxy server on %s exited: %v", name, addr, err)
 		}
 	}()
-	log.Printf("host %q: proxying on %s -> %s:%d (falls back to DIRECT if unreachable)", name, addr, h.MDNSHostname, h.Port)
+	log.Printf("host %q: proxying on %s -> %s:%d (falls back to DIRECT if unreachable)", name, addr, h.Target(), h.Port)
 }

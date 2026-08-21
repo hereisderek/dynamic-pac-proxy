@@ -48,8 +48,13 @@ var hostNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // pointers so we can tell "not set, inherit the global default" apart from
 // an explicit (if silly) zero value.
 type HostConfig struct {
-	Name            string    `yaml:"name"`
-	MDNSHostname    string    `yaml:"mdns_hostname"`
+	Name string `yaml:"name"`
+	// Exactly one of MDNSHostname or HostIP must be set — see
+	// ValidateConfig. HostIP skips mDNS resolution entirely, for hosts
+	// that already have a fixed address (e.g. a mitmproxy instance at a
+	// static LAN IP) or that don't answer mDNS at all.
+	MDNSHostname    string    `yaml:"mdns_hostname,omitempty"`
+	HostIP          string    `yaml:"host_ip,omitempty"`
 	Port            int       `yaml:"port"`
 	ListenPort      int       `yaml:"listen_port"`
 	RefreshInterval *Duration `yaml:"refresh_interval,omitempty"`
@@ -65,10 +70,21 @@ type HostConfig struct {
 	InterceptSSL bool `yaml:"intercept_ssl,omitempty"`
 }
 
+// Target returns whichever of MDNSHostname or HostIP is set — the address
+// this host is actually resolved/dialed at, for display purposes (logs,
+// /status). ValidateConfig guarantees exactly one of them is set.
+func (h HostConfig) Target() string {
+	if h.HostIP != "" {
+		return h.HostIP
+	}
+	return h.MDNSHostname
+}
+
 // EffectiveHost is a HostConfig with all the global defaults resolved in.
 type EffectiveHost struct {
 	Name            string
 	MDNSHostname    string
+	HostIP          string
 	Port            int
 	ListenPort      int
 	RefreshInterval time.Duration
@@ -105,6 +121,7 @@ func (c FileConfig) Effective(h HostConfig) EffectiveHost {
 	return EffectiveHost{
 		Name:            h.Name,
 		MDNSHostname:    h.MDNSHostname,
+		HostIP:          h.HostIP,
 		Port:            h.Port,
 		ListenPort:      h.ListenPort,
 		RefreshInterval: ri.Duration(),
@@ -192,8 +209,14 @@ func ValidateConfig(cfg FileConfig) error {
 			return fmt.Errorf("hosts[%d]: duplicate name %q", i, h.Name)
 		}
 		seenNames[h.Name] = true
-		if h.MDNSHostname == "" {
-			return fmt.Errorf("hosts[%d] (%s): mdns_hostname is required", i, h.Name)
+		if h.MDNSHostname == "" && h.HostIP == "" {
+			return fmt.Errorf("hosts[%d] (%s): either mdns_hostname or host_ip is required", i, h.Name)
+		}
+		if h.MDNSHostname != "" && h.HostIP != "" {
+			return fmt.Errorf("hosts[%d] (%s): mdns_hostname and host_ip are mutually exclusive — set only one", i, h.Name)
+		}
+		if h.HostIP != "" && net.ParseIP(h.HostIP) == nil {
+			return fmt.Errorf("hosts[%d] (%s): host_ip %q is not a valid IP address", i, h.Name, h.HostIP)
 		}
 		if h.Port < 1 || h.Port > 65535 {
 			return fmt.Errorf("hosts[%d] (%s): port must be between 1 and 65535, got %d", i, h.Name, h.Port)

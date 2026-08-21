@@ -54,3 +54,12 @@ hosts:
   #   refresh_interval: 5s
   #   dial_timeout: 500ms
   #   intercept_ssl: true
+
+  # A host with a fixed IP instead of an mDNS hostname — for a machine
+  # that already has a static/reserved address, or that doesn't answer
+  # mDNS at all (e.g. a mitmproxy instance). Exactly one of mdns_hostname
+  # or host_ip must be set per host, never both.
+  # - name: mitmproxy-box
+  #   host_ip: "172.16.2.23"
+  #   port: 8080         # mitmproxy's regular proxy port
+  #   listen_port: 8083

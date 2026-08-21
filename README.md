@@ -1,8 +1,10 @@
 # dynamic-pac-proxy
 
 Small Go service for a homelab LXC container that sits in front of Charles
-(or any HTTP(S) proxy) running on a machine whose IP moves around — found
-via mDNS/Bonjour (e.g. `dereks-MacBook-Pro.local`).
+(or any HTTP(S) proxy, e.g. [mitmproxy](https://mitmproxy.org)) running on
+a machine whose IP moves around — found via mDNS/Bonjour (e.g.
+`dereks-MacBook-Pro.local`), or at a fixed `host_ip` for a machine that
+already has a static address.
 
 Each configured host gets its own **fixed** listening port on this box.
 Devices point their proxy settings at that fixed address once, forever —
@@ -144,6 +146,11 @@ hosts:
     listen_port: 8082
     refresh_interval: 5s   # optional per-host override
     dial_timeout: 500ms    # optional per-host override
+
+  - name: mitmproxy-box
+    host_ip: "172.16.2.23"   # fixed IP instead of mdns_hostname — see below
+    port: 8080
+    listen_port: 8083
 ```
 
 Top-level fields:
@@ -153,7 +160,7 @@ Top-level fields:
 | `listen_addr`       | `:8080`          | Where the HTTP status/PAC server listens (not the proxy ports — see `listen_port` below) |
 | `advertise_host`    | auto-detected LAN IP | The address baked into PAC files at `/proxy/<name>.pac`; set explicitly if the auto-detected guess isn't what devices can actually reach (e.g. multi-homed box) |
 | `refresh_interval`  | `15s`            | Default health-check cache TTL for hosts that don't override it |
-| `mdns_timeout`      | `2s`             | Default mDNS reply timeout for hosts that don't override |
+| `mdns_timeout`      | `2s`             | Default mDNS reply timeout for hosts that don't override (unused for `host_ip` hosts — nothing to resolve) |
 | `dial_timeout`      | `1s`             | Default TCP dial timeout for hosts that don't override |
 | `failure_cooldown`  | `5s`             | Default minimum spacing between failure-triggered early rechecks, for hosts that don't override |
 | `certs_dir`         | a `certs` folder next to `config.yaml` | Directory served at `/certs` for downloading/installing Charles's SSL certificate — see "SSL certificates" below |
@@ -164,8 +171,9 @@ Each entry in `hosts`:
 | Field              | Required | Meaning                                                |
 |---------------------|----------|-----------------------------------------------------------|
 | `name`              | yes      | Identifier used in URLs/status (`[a-zA-Z0-9_-]+`, unique)|
-| `mdns_hostname`     | yes      | Bonjour hostname to resolve, e.g. `some-machine.local`   |
-| `port`              | yes      | The port Charles (or whatever proxy) listens on, on that resolved host |
+| `mdns_hostname`     | one of these two | Bonjour hostname to resolve, e.g. `some-machine.local` |
+| `host_ip`           | one of these two | Fixed IP instead of a Bonjour hostname — skips mDNS resolution entirely. Use this for a machine with a static/reserved address, or one that doesn't answer mDNS at all (e.g. a [mitmproxy](https://mitmproxy.org) instance) |
+| `port`              | yes      | The port Charles (or whatever proxy) listens on, on that host |
 | `listen_port`       | yes      | The fixed port **this box** listens on for this host — point devices here. Must be unique across hosts and different from `listen_addr`'s port |
 | `refresh_interval`  | no       | Overrides the top-level default for this host only       |
 | `mdns_timeout`      | no       | Overrides the top-level default for this host only       |
@@ -385,8 +393,9 @@ segment. Running it in an LXC container needs that container's NIC
 bridged onto the same L2/VLAN as your Mac (the typical Proxmox `vmbr0`
 setup) — if the container is instead behind NAT (e.g. a separate routed
 subnet), multicast won't reach it and resolution will fail. In that case
-you'd need an mDNS reflector/repeater on the network, or switch to a
-static IP / DHCP reservation for the Mac instead of hostname resolution.
+you'd need an mDNS reflector/repeater on the network, or sidestep mDNS
+entirely for that host by giving it a static IP / DHCP reservation and
+using `host_ip` instead of `mdns_hostname` in its config entry.
 
 ## Point a device at it
 

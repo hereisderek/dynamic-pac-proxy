@@ -47,7 +47,7 @@ func WriteStatusJSON(w http.ResponseWriter, cfg config.FileConfig, states *healt
 
 		hs := HostStatus{
 			Name:       h.Name,
-			Hostname:   h.MDNSHostname,
+			Hostname:   h.Target(),
 			Port:       h.Port,
 			ListenPort: h.ListenPort,
 			Reachable:  snap.Reachable,
