@@ -64,10 +64,11 @@ internal/
   health/             lazy TTL-gated reachability cache
   proxy/               the forward-proxy handler + per-host listener manager
   mdns/               raw mDNS (RFC 6762) A-record resolver
+  mitm/               this tool's own local CA + per-host leaf cert issuance
   webui/              /proxy/<name>.pac, /status, /certs
   install/            --install/--uninstall (systemd/OpenRC)
 tests/
-  config/, health/, proxy/, webui/   one test package per internal/ package
+  config/, health/, proxy/, webui/, mitm/   one test package per internal/ package
 deploy/               example config.yaml + systemd/OpenRC/OpenWRT unit files
 openwrt/              self-contained OpenWRT UCI+LuCI package (see its own README)
 certs/                drop your exported Charles root certificate here
@@ -170,6 +171,7 @@ Each entry in `hosts`:
 | `mdns_timeout`      | no       | Overrides the top-level default for this host only       |
 | `dial_timeout`      | no       | Overrides the top-level default for this host only       |
 | `failure_cooldown`  | no       | Overrides the top-level default for this host only       |
+| `intercept_ssl`     | no       | Terminate HTTPS at this box instead of tunneling it opaquely — see "SSL interception" below. Default `false` |
 
 **Hot reload:** editing `hosts` (adding, removing, or changing any host's
 settings), or the top-level defaults, takes effect within a few seconds
@@ -412,6 +414,11 @@ host "derek-macbook": GET http://example.com/ from 192.168.1.42 -> chained via 1
 host "derek-macbook": CONNECT example.com:443 from 192.168.1.42 -> chained
 ```
 
+With `intercept_ssl` enabled for a host (see "SSL interception" below),
+the CONNECT line above becomes a real request line with the actual path —
+`GET https://example.com/some/page from 192.168.1.42 -> DIRECT` — instead
+of just the bare `host:443` a plain tunnel can see.
+
 This works because devices are configured to talk straight to this box
 (per the PAC/manual proxy setup above) — `r.RemoteAddr` on every request is
 therefore always the real client device, never a hop through Charles. If
@@ -442,3 +449,53 @@ request, so dropping in a new certificate doesn't need a restart.
 
 Check `http://<lxc-host-ip>:8080/status` any time to see what each
 configured host currently resolved to and whether it's reachable.
+
+## SSL interception
+
+Set `intercept_ssl: true` on a host to have **this tool** terminate HTTPS
+for it, instead of tunneling opaque encrypted bytes end to end:
+
+1. When a client CONNECTs for that host, this box presents its own
+   certificate for the requested domain — issued on the fly, signed by
+   dynamic-pac-proxy's own local CA ("Dynamic PAC Proxy Local CA") — and
+   completes the TLS handshake with the client itself.
+2. With the traffic now decrypted, the real HTTP request (method, full
+   path, headers) goes through the exact same chained-vs-DIRECT logic as
+   plain HTTP requests — see "How it works" — which means access logging
+   now shows the real URL for HTTPS traffic too, not just the CONNECT
+   `host:443`.
+3. It's then re-encrypted over a brand new, real TLS connection to
+   whatever it's forwarded to (chained through Charles's own CONNECT, or
+   straight to the real destination) — nothing between this box and the
+   real destination ever goes out in the clear.
+
+For this to work, every client device needs to install and trust this
+tool's own CA — its public certificate is generated automatically (once,
+on first use of `intercept_ssl` anywhere) and shows up on the `/certs`
+page alongside any Charles certificate you've dropped in, as
+`dynamic-pac-proxy-ca.pem`; see `certs/README.md`. The matching private
+key is written next to `config.yaml` (never under `certs/`, never served)
+— back it up along with your config if you don't want every device to
+need re-trusting after a fresh install.
+
+**Caveats:**
+
+- Nothing is generated or touched on disk until some host actually needs
+  it — same lazy-on-first-use design as the health checks.
+- The client-facing side only speaks HTTP/1.1 (no HTTP/2) — this tool
+  doesn't offer `h2` in its ALPN response, so browsers negotiate HTTP/1.1
+  with it instead. The upstream/outbound leg is unaffected by this.
+- If a host has both `intercept_ssl: true` *and* Charles's own SSL
+  Proxying enabled for the same domain, you'll get a double interception:
+  this tool decrypts first, then re-encrypts a fresh TLS connection that
+  gets tunneled through Charles via CONNECT — at which point Charles's own
+  SSL Proxying would try to intercept *that* connection too, presenting
+  *its* certificate to this tool's outbound request. This tool doesn't
+  trust Charles's CA for outbound connections (only the system's normal
+  roots), so that combination will fail with a certificate error. Use one
+  or the other for a given host, not both.
+- A destination with its own self-signed/private certificate (not signed
+  by a public or system-trusted CA) will fail the same way any HTTPS
+  client would — this tool verifies the real destination's certificate
+  against the normal system trust store on the outbound leg; it doesn't
+  weaken that check.

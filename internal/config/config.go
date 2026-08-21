@@ -56,6 +56,13 @@ type HostConfig struct {
 	MDNSTimeout     *Duration `yaml:"mdns_timeout,omitempty"`
 	DialTimeout     *Duration `yaml:"dial_timeout,omitempty"`
 	FailureCooldown *Duration `yaml:"failure_cooldown,omitempty"`
+	// InterceptSSL, when true, terminates HTTPS for this host at this box
+	// instead of tunneling opaque bytes: it presents a certificate signed
+	// by this proxy's own local CA (see internal/mitm) to the client,
+	// decrypts the request, then re-encrypts before forwarding onward
+	// (chained through the upstream if reachable, or straight to the real
+	// destination otherwise) — see the "SSL interception" README section.
+	InterceptSSL bool `yaml:"intercept_ssl,omitempty"`
 }
 
 // EffectiveHost is a HostConfig with all the global defaults resolved in.
@@ -355,4 +362,14 @@ func (s *Store) CertsDir() string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return ResolveCertsDir(s.cfg, s.path)
+}
+
+// ConfigDir returns the directory containing the config file — used to
+// place files that must live *next to* config.yaml but, unlike CertsDir,
+// must never be served over HTTP (e.g. the local CA's private key; see
+// internal/mitm).
+func (s *Store) ConfigDir() string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return filepath.Dir(s.path)
 }

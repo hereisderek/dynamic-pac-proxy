@@ -56,9 +56,15 @@ packages).
   if a reload fails to parse/validate — a bad edit is logged, never fatal,
   once the service is already running. Also owns `ResolveConfigPath` (flag
   → `/etc/dynamic-pac-proxy/config.yaml` → `config.yaml` beside the binary
-  → fallback default) and `ResolveCertsDir`/`Store.CertsDir` (the directory
+  → fallback default), `ResolveCertsDir`/`Store.CertsDir` (the directory
   served at `/certs`, resolved fresh on every request so a hot-reloaded
-  `certs_dir` takes effect without a restart).
+  `certs_dir` takes effect without a restart), and `Store.ConfigDir` (the
+  directory the config file itself lives in — used to place the local CA's
+  private key somewhere that, unlike `CertsDir`, is never served). Per-host
+  `HostConfig.InterceptSSL` (`intercept_ssl` in YAML) is read straight off
+  the live config on every CONNECT rather than merged into
+  `EffectiveHost`, since it has no top-level default to inherit — see
+  `internal/proxy`.
 - **`internal/health`** — a **lazy, TTL-gated** reachability cache.
   `State.GetFresh()` only does a real mDNS resolve + TCP dial
   (`checkHost()`) when the cached `Snapshot` is older than that host's
@@ -79,22 +85,58 @@ packages).
     `upstreamDecision`, specifically so `ErrorHandler` can tell whether a
     failure happened on the chained path (→ call `reportUpstreamFailure`)
     or the direct path (→ leave the cache alone, since that failure has
-    nothing to do with Charles). `handleConnect` implements HTTPS
-    tunneling by hijacking the client connection and splicing it to an
-    upstream tunnel — chained through Charles via our own CONNECT
-    (`chainedConnect`) if reachable, or dialed straight to the target
-    otherwise; a failed chained attempt calls `reportUpstreamFailure`
-    before falling back. Every request is logged with the client's own
-    address (`clientIP`, i.e. `r.RemoteAddr`) alongside the target and
-    chained/DIRECT outcome — devices talk straight to this box, so that's
-    always the real originating device, never Charles's or the target's.
+    nothing to do with Charles). The plain-HTTP and (decrypted)
+    intercepted-HTTPS paths share one handler — `newProxyHandler` — since
+    once a request has a scheme+host filled in, "decide chained-vs-DIRECT,
+    log, forward" is identical either way.
+  - `handleConnect` dispatches a CONNECT to one of two implementations
+    depending on that host's `intercept_ssl`:
+    - `handleConnectTunnel` (default): hijacks the client connection and
+      splices it byte-for-byte to an upstream tunnel — chained through
+      Charles via our own CONNECT (`chainedConnect`) if reachable, or
+      dialed straight to the target otherwise; a failed chained attempt
+      calls `reportUpstreamFailure` before falling back. TLS terminates at
+      the client and the real destination, unmodified — this box never
+      sees plaintext.
+    - `handleConnectIntercept` (`intercept_ssl: true`): hijacks the client
+      connection, then TLS-terminates it itself using a certificate the
+      shared local CA (`internal/mitm`) issues on the fly for the SNI it
+      sees, and serves the decrypted HTTP/1.1 traffic through
+      `newProxyHandler` — via `singleConnListener`, a one-shot
+      `net.Listener` adapter that lets `http.Server` drive request/response
+      parsing (keep-alive included) over the already-terminated connection
+      instead of a hand-rolled read loop. `handleConnect` falls back to
+      `handleConnectTunnel` if the CA can't be loaded, rather than breaking
+      the connection outright.
   - `Manager` owns one `net.Listener` + `http.Server` per configured host;
-    `Reconcile()` starts/stops/rebinds them as the config changes.
+    `Reconcile()` starts/stops/rebinds them as the config changes. It also
+    lazily loads/generates the one shared `mitm.CA` (`getCA`, `sync.Once`)
+    the moment any host with `intercept_ssl` actually needs it — nothing
+    is touched on disk before then, same as the health cache never
+    checking until traffic asks it to.
+  - Every request (plain HTTP or decrypted-HTTPS alike) is logged with the
+    client's own address (`clientIP`, i.e. `r.RemoteAddr`) alongside the
+    target and chained/DIRECT outcome — devices talk straight to this box,
+    so that's always the real originating device, never Charles's or the
+    target's. Under `intercept_ssl` this logs the real decrypted URL, not
+    just the CONNECT `host:port`.
 - **`internal/mdns`** — `ResolveA` is a from-scratch mDNS (RFC 6762)
   A-record resolver over raw multicast UDP
   (`golang.org/x/net/dns/dnsmessage`), not a shell-out to `avahi-resolve`
   — deliberate, so it works on a minimal container with no `avahi-daemon`
   running.
+- **`internal/mitm`** — dynamic-pac-proxy's own certificate authority,
+  used only by hosts with `intercept_ssl` enabled. `LoadOrCreate` loads an
+  existing CA from disk or generates a fresh ECDSA P-256 one (Common Name
+  "Dynamic PAC Proxy Local CA") if missing/expired; the public cert is
+  meant to be written under the certs directory (so it surfaces on
+  `/certs` automatically) while the private key must be written somewhere
+  `internal/webui` never serves — `internal/proxy.Manager.getCA` is what
+  actually picks those two paths (certs dir vs. `config.Store.ConfigDir`)
+  before calling this. `CA.LeafCertificate`/`CertificateFor` issue and
+  cache (by hostname) a fresh leaf certificate signed by that CA per SNI —
+  this is what lets `handleConnectIntercept` present a trusted-once-the-CA-
+  is-installed certificate for whatever domain the client is asking for.
 - **`internal/webui`** — the auxiliary HTTP endpoints, as opposed to the
   per-host proxy ports in `internal/proxy`:
   - `pac.go`: `BuildPAC` is static: always
@@ -106,9 +148,12 @@ packages).
     directory (see `internal/config.ResolveCertsDir`), with per-platform
     install instructions, plus the actual file downloads with a
     content-type mobile OSes recognize as an installable cert/profile
-    (`certMimeTypes`). The certificate itself is never bundled with the
+    (`certMimeTypes`). Charles's own certificate is never bundled with the
     binary — Charles generates its own root CA per install; see
     `certs/README.md` for how a user exports and drops theirs in.
+    dynamic-pac-proxy's own generated CA cert (`internal/mitm`) lands in
+    the same directory under its own filename, so it's listed here too,
+    automatically, the moment any host's `intercept_ssl` first needs it.
 - **`internal/install`** — `Run`/`Uninstall` (called from `main.go` for
   `--install`/`--uninstall`): detects the init system (`systemd` via
   `/run/systemd/system`, OpenRC via `rc-service` on `PATH`), renders +

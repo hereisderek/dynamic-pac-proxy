@@ -40,13 +40,17 @@ hosts:
                        # at advertise_host:8081; traffic is forwarded to
                        # Charles when it's reachable, DIRECT when it's not.
 
-  # A second host, with its own ports and a per-host override of the
-  # defaults above (any of refresh_interval / mdns_timeout / dial_timeout /
+  # A second host, with its own ports, a per-host override of the defaults
+  # above (any of refresh_interval / mdns_timeout / dial_timeout /
   # failure_cooldown can be overridden per host; omit to inherit the
-  # top-level default).
+  # top-level default), and SSL interception enabled (see the "SSL
+  # interception" section of README.md — installing
+  # certs/dynamic-pac-proxy-ca.pem on the client is required for this to
+  # work instead of every HTTPS site failing to load).
   # - name: office-pc
   #   mdns_hostname: office-desktop.local
   #   port: 9999
   #   listen_port: 8082
   #   refresh_interval: 5s
   #   dial_timeout: 500ms
+  #   intercept_ssl: true
