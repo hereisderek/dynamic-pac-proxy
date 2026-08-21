@@ -1,11 +1,19 @@
 package mitm_test
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
+	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/derekhud/dynamic-pac-proxy/internal/mitm"
 )
@@ -157,5 +165,131 @@ func TestCertificateForUsesSNIThenFallsBack(t *testing.T) {
 
 	if _, err := ca.CertificateFor(&tls.ClientHelloInfo{}, ""); err == nil {
 		t.Fatal("expected an error when neither SNI nor a fallback host is available")
+	}
+}
+
+// TestLeafCertificateIPLiteralUsesIPAddresses guards against a leaf
+// certificate for an IP-literal SNI/host (e.g. https://127.0.0.1) putting
+// that value in DNSNames — TLS verifiers require IP literals in
+// IPAddresses instead, so a DNSNames-only cert fails hostname
+// verification for such hosts.
+func TestLeafCertificateIPLiteralUsesIPAddresses(t *testing.T) {
+	dir := t.TempDir()
+	ca, err := mitm.LoadOrCreate(filepath.Join(dir, "ca.pem"), filepath.Join(dir, "ca-key.pem"))
+	if err != nil {
+		t.Fatalf("LoadOrCreate: %v", err)
+	}
+
+	for _, ipLiteral := range []string{"127.0.0.1", "::1"} {
+		leaf, err := ca.LeafCertificate(ipLiteral)
+		if err != nil {
+			t.Fatalf("LeafCertificate(%q): %v", ipLiteral, err)
+		}
+		leafCert, err := x509.ParseCertificate(leaf.Certificate[0])
+		if err != nil {
+			t.Fatalf("parse issued leaf for %q: %v", ipLiteral, err)
+		}
+		if len(leafCert.DNSNames) != 0 {
+			t.Fatalf("DNSNames = %v, want none for IP literal %q", leafCert.DNSNames, ipLiteral)
+		}
+		if len(leafCert.IPAddresses) != 1 || !leafCert.IPAddresses[0].Equal(net.ParseIP(ipLiteral)) {
+			t.Fatalf("IPAddresses = %v, want [%s]", leafCert.IPAddresses, ipLiteral)
+		}
+
+		pool := x509.NewCertPool()
+		pool.AddCert(ca.Certificate())
+		if _, err := leafCert.Verify(x509.VerifyOptions{Roots: pool}); err != nil {
+			t.Fatalf("issued leaf for %q doesn't verify against the CA: %v", ipLiteral, err)
+		}
+	}
+}
+
+// TestLoadOrCreateRejectsInsecureKeyPermissions guards against trusting a
+// CA private key that's readable by other users on the box — that breaks
+// the whole point of keeping it off /certs. LoadOrCreate must fail loudly
+// rather than silently loading (or regenerating over) it.
+func TestLoadOrCreateRejectsInsecureKeyPermissions(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "ca.pem")
+	keyPath := filepath.Join(dir, "ca-key.pem")
+	if _, err := mitm.LoadOrCreate(certPath, keyPath); err != nil {
+		t.Fatalf("seed LoadOrCreate: %v", err)
+	}
+
+	if err := os.Chmod(keyPath, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := mitm.LoadOrCreate(certPath, keyPath); err == nil {
+		t.Fatal("expected LoadOrCreate to reject a group/world-readable private key file")
+	}
+}
+
+// TestLoadOrCreateRejectsMismatchedKey guards against a restored/mixed-up
+// cert+key pair that parses fine individually but doesn't actually belong
+// together — that would start up successfully yet issue leaves no client
+// could verify against the installed CA cert.
+func TestLoadOrCreateRejectsMismatchedKey(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "ca.pem")
+	keyPath := filepath.Join(dir, "ca-key.pem")
+	if _, err := mitm.LoadOrCreate(certPath, keyPath); err != nil {
+		t.Fatalf("seed LoadOrCreate: %v", err)
+	}
+
+	unrelatedKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeECKeyPEM(t, keyPath, unrelatedKey)
+
+	if _, err := mitm.LoadOrCreate(certPath, keyPath); err == nil {
+		t.Fatal("expected LoadOrCreate to reject a private key that doesn't match the certificate's public key")
+	}
+}
+
+// TestLoadOrCreateRejectsNonCACertificate guards against loading a
+// certificate that parses fine but was never actually a CA (missing
+// BasicConstraints/IsCA) — accepting it would issue leaves under a
+// "CA" that no client's trust store would ever recognize as one.
+func TestLoadOrCreateRejectsNonCACertificate(t *testing.T) {
+	dir := t.TempDir()
+	certPath := filepath.Join(dir, "ca.pem")
+	keyPath := filepath.Join(dir, "ca-key.pem")
+
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	template := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "not a real CA"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(24 * time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		// IsCA/BasicConstraintsValid deliberately left false.
+	}
+	der, err := x509.CreateCertificate(rand.Reader, template, template, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeECKeyPEM(t, keyPath, key)
+
+	if _, err := mitm.LoadOrCreate(certPath, keyPath); err == nil {
+		t.Fatal("expected LoadOrCreate to reject a certificate that isn't a CA")
+	}
+}
+
+func writeECKeyPEM(t *testing.T, path string, key *ecdsa.PrivateKey) {
+	t.Helper()
+	der, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der}), 0o600); err != nil {
+		t.Fatal(err)
 	}
 }

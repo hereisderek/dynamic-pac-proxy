@@ -138,9 +138,23 @@ packages).
   `/certs` automatically) while the private key must be written somewhere
   `internal/webui` never serves — `internal/proxy.Manager.getCA` is what
   actually picks those two paths (certs dir vs. `config.Store.ConfigDir`)
-  before calling this. `CA.LeafCertificate`/`CertificateFor` issue and
-  cache (by hostname) a fresh leaf certificate signed by that CA per SNI —
-  this is what lets `handleConnectIntercept` present a trusted-once-the-CA-
+  before calling this; `internal/webui`'s `/certs` listing/serving also
+  excludes the key's filename outright, so even a `certs_dir` that's
+  configured to overlap `ConfigDir` can't leak it. Loading a CA from disk
+  validates it first — `IsCA`/`BasicConstraintsValid`, a self-signature
+  check, the private key's public half actually matching the certificate,
+  and the key file not being group/world-readable — since a
+  parseable-but-mismatched pair or a loosely-permissioned key would start
+  up fine while quietly breaking the trust model. `CA.LeafCertificate`/
+  `CertificateFor` issue and cache (by hostname) a fresh leaf certificate
+  signed by that CA per SNI, expiry-aware (an entry past its `NotAfter` is
+  regenerated rather than served stale) and capped at
+  `maxLeafCacheEntries` (dropping the whole cache rather than tracking
+  per-entry LRU, since it's cheap to regenerate) so arbitrary client SNI
+  values can't grow it forever; an IP-literal hostname (no SNI, or a
+  `https://<ip>` CONNECT target) goes into the leaf's `IPAddresses`, not
+  `DNSNames`, since that's what TLS verifiers require for IP literals.
+  This is what lets `handleConnectIntercept` present a trusted-once-the-CA-
   is-installed certificate for whatever domain the client is asking for.
 - **`internal/webui`** — the auxiliary HTTP endpoints, as opposed to the
   per-host proxy ports in `internal/proxy`:

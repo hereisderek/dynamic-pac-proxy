@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/derekhud/dynamic-pac-proxy/internal/config"
+	"github.com/derekhud/dynamic-pac-proxy/internal/mitm"
 )
 
 // certMimeTypes maps certificate file extensions to the content type that
@@ -110,8 +111,14 @@ type CertFileInfo struct {
 
 // ListCertFiles returns the regular, non-hidden files in dir, sorted by
 // name — README.md is excluded since it's documentation for the folder,
-// not something to install. A missing directory just yields no files;
-// the index page explains what to do about that.
+// not something to install, and the local CA's private key filename is
+// always excluded too: certs_dir and config.Store.ConfigDir (where the CA
+// key is written, see internal/mitm) are configured independently, and a
+// certs_dir that happens to resolve to the same directory (e.g.
+// certs_dir: ".") must never cause the private key to be listed here — it
+// would then also be downloadable via CertsFileHandler. A missing
+// directory just yields no files; the index page explains what to do
+// about that.
 func ListCertFiles(dir string) []CertFileInfo {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -119,7 +126,7 @@ func ListCertFiles(dir string) []CertFileInfo {
 	}
 	var files []CertFileInfo
 	for _, e := range entries {
-		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || strings.EqualFold(e.Name(), "README.md") {
+		if e.IsDir() || strings.HasPrefix(e.Name(), ".") || strings.EqualFold(e.Name(), "README.md") || strings.EqualFold(e.Name(), mitm.CAKeyFileName) {
 			continue
 		}
 		info, err := e.Info()
@@ -163,7 +170,7 @@ func CertsIndexHandler(cfgStore *config.Store) http.Handler {
 func CertsFileHandler(cfgStore *config.Store) http.Handler {
 	return http.StripPrefix("/certs/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		name := r.URL.Path
-		if name == "" || strings.Contains(name, "/") || strings.Contains(name, "..") || strings.HasPrefix(name, ".") || strings.EqualFold(name, "README.md") {
+		if name == "" || strings.Contains(name, "/") || strings.Contains(name, "..") || strings.HasPrefix(name, ".") || strings.EqualFold(name, "README.md") || strings.EqualFold(name, mitm.CAKeyFileName) {
 			http.NotFound(w, r)
 			return
 		}

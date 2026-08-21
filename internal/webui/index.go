@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"html/template"
 	"log"
+	"net"
 	"net/http"
+	"strconv"
 
 	"github.com/derekhud/dynamic-pac-proxy/internal/config"
 )
@@ -92,9 +94,12 @@ func IndexHandler(cfgStore *config.Store) http.Handler {
 			pacURL := pacPath
 			manualAddr := fmt.Sprintf("(set advertise_host in config.yaml):%d", h.ServerPort)
 			if cfg.AdvertiseHost != "" {
-				manualAddr = fmt.Sprintf("%s:%d", cfg.AdvertiseHost, h.ServerPort)
+				// net.JoinHostPort brackets IPv6 literals (e.g.
+				// "[::1]:8081") — plain %s:%d would produce an address
+				// that's ambiguous with the literal's own colons.
+				manualAddr = net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(h.ServerPort))
 				if portOK {
-					pacURL = fmt.Sprintf("http://%s:%d%s", cfg.AdvertiseHost, port, pacPath)
+					pacURL = fmt.Sprintf("http://%s%s", net.JoinHostPort(cfg.AdvertiseHost, strconv.Itoa(port)), pacPath)
 				}
 			}
 			hosts = append(hosts, indexHost{

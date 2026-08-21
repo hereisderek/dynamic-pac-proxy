@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"net"
 	"os"
 	"path/filepath"
 	"sync"
@@ -45,6 +46,14 @@ const (
 	// ones a real site would present.
 	leafValidity = 397 * 24 * time.Hour
 	clockSkew    = time.Hour
+	// maxLeafCacheEntries bounds how many per-hostname leaf certificates
+	// are cached at once. Without a cap, an intercepting proxy that sees
+	// arbitrary client-chosen SNI values (or a hostname whose cached leaf
+	// has expired and keeps regenerating under a slightly different key
+	// each time) would grow this map forever. The cache is small and
+	// cheap to regenerate, so on overflow it's simplest to just drop the
+	// whole thing and start over rather than implement real LRU eviction.
+	maxLeafCacheEntries = 4096
 )
 
 // CA is a locally-generated certificate authority used to sign per-host
@@ -54,7 +63,16 @@ type CA struct {
 	key  *ecdsa.PrivateKey
 
 	mu    sync.Mutex
-	cache map[string]*tls.Certificate
+	cache map[string]leafCacheEntry
+}
+
+// leafCacheEntry pairs a cached leaf certificate with its expiry so
+// LeafCertificate can tell a still-valid cache hit from a stale one — a
+// long-running process would otherwise keep serving an expired
+// certificate to every client past leafValidity.
+type leafCacheEntry struct {
+	cert     *tls.Certificate
+	notAfter time.Time
 }
 
 // errRegenerate marks the only two load() failures that should trigger
@@ -90,11 +108,23 @@ func load(certPath, keyPath string) (*CA, error) {
 		}
 		return nil, fmt.Errorf("read %s: %w", certPath, err)
 	}
-	keyPEM, err := os.ReadFile(keyPath)
+	keyInfo, err := os.Stat(keyPath)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("%s: %w", keyPath, errRegenerate)
 		}
+		return nil, fmt.Errorf("stat %s: %w", keyPath, err)
+	}
+	// A group/world-readable private key means this CA's trust boundary is
+	// already broken — anyone with access to that file can mint leaf
+	// certificates for any hostname. Refuse to load it rather than
+	// silently trusting a key that may already be compromised; the
+	// operator has to notice and chmod it themselves.
+	if perm := keyInfo.Mode().Perm(); perm&0o077 != 0 {
+		return nil, fmt.Errorf("%s: mode %v is group/world-accessible; chmod 600 it before it can be trusted as a CA private key", keyPath, perm)
+	}
+	keyPEM, err := os.ReadFile(keyPath)
+	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", keyPath, err)
 	}
 
@@ -109,6 +139,12 @@ func load(certPath, keyPath string) (*CA, error) {
 	if time.Now().After(cert.NotAfter) {
 		return nil, fmt.Errorf("%s: expired: %w", certPath, errRegenerate)
 	}
+	if !cert.IsCA || !cert.BasicConstraintsValid {
+		return nil, fmt.Errorf("%s: certificate is not a valid CA", certPath)
+	}
+	if err := cert.CheckSignature(cert.SignatureAlgorithm, cert.RawTBSCertificate, cert.Signature); err != nil {
+		return nil, fmt.Errorf("%s: not self-signed: %w", certPath, err)
+	}
 
 	keyBlock, _ := pem.Decode(keyPEM)
 	if keyBlock == nil {
@@ -118,8 +154,12 @@ func load(certPath, keyPath string) (*CA, error) {
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", keyPath, err)
 	}
+	certPub, ok := cert.PublicKey.(*ecdsa.PublicKey)
+	if !ok || !certPub.Equal(&key.PublicKey) {
+		return nil, fmt.Errorf("%s and %s: certificate public key does not match the private key", certPath, keyPath)
+	}
 
-	return &CA{cert: cert, key: key, cache: make(map[string]*tls.Certificate)}, nil
+	return &CA{cert: cert, key: key, cache: make(map[string]leafCacheEntry)}, nil
 }
 
 func create(certPath, keyPath string) (*CA, error) {
@@ -161,7 +201,7 @@ func create(certPath, keyPath string) (*CA, error) {
 		return nil, err
 	}
 
-	return &CA{cert: cert, key: key, cache: make(map[string]*tls.Certificate)}, nil
+	return &CA{cert: cert, key: key, cache: make(map[string]leafCacheEntry)}, nil
 }
 
 // writePEM writes a PEM-encoded file with the given permissions. perm is
@@ -197,8 +237,9 @@ func randomSerial() (*big.Int, error) {
 func (ca *CA) LeafCertificate(hostname string) (*tls.Certificate, error) {
 	ca.mu.Lock()
 	defer ca.mu.Unlock()
-	if cert, ok := ca.cache[hostname]; ok {
-		return cert, nil
+	now := time.Now()
+	if entry, ok := ca.cache[hostname]; ok && now.Before(entry.notAfter) {
+		return entry.cert, nil
 	}
 
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -209,14 +250,22 @@ func (ca *CA) LeafCertificate(hostname string) (*tls.Certificate, error) {
 	if err != nil {
 		return nil, err
 	}
+	notAfter := now.Add(leafValidity)
 	template := &x509.Certificate{
 		SerialNumber: serial,
 		Subject:      pkix.Name{CommonName: hostname},
-		DNSNames:     []string{hostname},
-		NotBefore:    time.Now().Add(-clockSkew),
-		NotAfter:     time.Now().Add(leafValidity),
+		NotBefore:    now.Add(-clockSkew),
+		NotAfter:     notAfter,
 		KeyUsage:     x509.KeyUsageDigitalSignature,
 		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+	}
+	// TLS verifiers require an IP-literal SNI/host (e.g. https://127.0.0.1
+	// or an IPv6 literal) to appear in IPAddresses, not DNSNames — a
+	// DNSNames-only cert fails hostname verification for those.
+	if ip := net.ParseIP(hostname); ip != nil {
+		template.IPAddresses = []net.IP{ip}
+	} else {
+		template.DNSNames = []string{hostname}
 	}
 	der, err := x509.CreateCertificate(rand.Reader, template, ca.cert, &key.PublicKey, ca.key)
 	if err != nil {
@@ -227,7 +276,10 @@ func (ca *CA) LeafCertificate(hostname string) (*tls.Certificate, error) {
 		Certificate: [][]byte{der, ca.cert.Raw},
 		PrivateKey:  key,
 	}
-	ca.cache[hostname] = cert
+	if len(ca.cache) >= maxLeafCacheEntries {
+		ca.cache = make(map[string]leafCacheEntry, maxLeafCacheEntries)
+	}
+	ca.cache[hostname] = leafCacheEntry{cert: cert, notAfter: notAfter}
 	return cert, nil
 }
 
