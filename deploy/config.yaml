@@ -63,3 +63,27 @@ hosts:
     host_ip: "172.16.2.23"
     host_port: 8081      # mitmproxy's regular proxy port
     server_port: 8082
+
+# Optional: standalone public reverse-proxy mirrors for a domain you
+# actually own, fronted by a real Let's Encrypt certificate (obtained via
+# DNS-01 — no port 80 needed), with addon scripts able to rewrite
+# request/response content in transit. See the "Sites: public reverse-proxy
+# mirrors" section of README.md — this is unrelated to intercept_ssl above,
+# which only works for domains you *don't* own. Requires CLOUDFLARE_API_TOKEN
+# (or whatever env var api_token_env names, or a literal cloudflare.api_token)
+# to actually be set, or the config fails to load. Renewal is fully
+# automatic once a certificate is issued — no config change needed.
+# sites:
+#   - name: netflix
+#     addons:
+#       - "netflix/cookie.star"
+#     serve:
+#       domain: netflix.mydomain.com
+#       listen_addr: ":8443"
+#       backend: "https://www.netflix.com"
+#       acme_email: you@mydomain.com
+#       dns_provider: cloudflare
+#       cloudflare:
+#         api_token_env: "CLOUDFLARE_API_TOKEN"
+#         # api_token: "..."       # or a literal token instead of api_token_env
+#       # acme_staging: true       # optional: use Let's Encrypt's staging directory

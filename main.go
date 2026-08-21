@@ -13,7 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/derekhud/dynamic-pac-proxy/internal/addon"
 	"github.com/derekhud/dynamic-pac-proxy/internal/config"
+	"github.com/derekhud/dynamic-pac-proxy/internal/edge"
 	"github.com/derekhud/dynamic-pac-proxy/internal/health"
 	"github.com/derekhud/dynamic-pac-proxy/internal/install"
 	"github.com/derekhud/dynamic-pac-proxy/internal/proxy"
@@ -57,16 +59,25 @@ func main() {
 		log.Fatalf("config: %v", err)
 	}
 
+	// addonRuntime is shared by every "sites:" addon consumer — today just
+	// edgeManager (Shape B's public reverse-proxy mirrors), and in the
+	// future the intercept_ssl pipeline in internal/proxy too.
+	addonRuntime := addon.NewRuntime()
+
 	states := health.NewStateStore()
 	manager := proxy.NewManager(cfgStore, states)
 	manager.Reconcile() // start a forward-proxy listener for every host in the initial config
+
+	edgeManager := edge.NewManager(cfgStore, addonRuntime)
+	edgeManager.Reconcile() // start a public HTTPS listener for every serve-enabled site in the initial config
 
 	go func() {
 		ticker := time.NewTicker(configPollInterval)
 		defer ticker.Stop()
 		for range ticker.C {
 			cfgStore.ReloadIfChanged()
-			manager.Reconcile() // pick up hosts added/removed/rebound by the reload
+			manager.Reconcile()     // pick up hosts added/removed/rebound by the reload
+			edgeManager.Reconcile() // pick up sites added/removed/rebound by the reload
 		}
 	}()
 
