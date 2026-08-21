@@ -17,6 +17,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -183,6 +184,154 @@ def response(flow):
 	}
 	if resp.Header.Get("X-Modified") != "yes" {
 		t.Fatal("missing X-Modified header from response hook")
+	}
+}
+
+func TestEdgeReverseProxyJoinsBackendPathAndQuery(t *testing.T) {
+	t.Setenv("TEST_EDGE_CF_TOKEN", "unused-in-test")
+
+	var gotPath, gotQuery string
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotQuery = r.URL.RawQuery
+		w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	sitePort := freePort(t)
+	writeConfigYAML(t, configPath, freePort(t), "netflix", "test.example", sitePort, backend.URL+"/api?shared=1", nil)
+
+	store, err := config.LoadInitial(configPath)
+	if err != nil {
+		t.Fatalf("LoadInitial: %v", err)
+	}
+
+	m := edge.NewManagerForTesting(store, addon.NewRuntime(), fakeCertFunc())
+	m.Reconcile()
+
+	conn := dialTLSWithRetry(t, fmt.Sprintf("127.0.0.1:%d", sitePort), "test.example", 3*time.Second)
+	defer conn.Close()
+
+	fmt.Fprintf(conn, "GET /users?id=5 HTTP/1.1\r\nHost: test.example\r\nConnection: close\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+	io.ReadAll(resp.Body)
+
+	if gotPath != "/api/users" {
+		t.Fatalf("backend saw path %q, want /api/users (serve.backend's own path prefixed)", gotPath)
+	}
+	if gotQuery != "shared=1&id=5" {
+		t.Fatalf("backend saw query %q, want shared=1&id=5 (serve.backend's own query merged in)", gotQuery)
+	}
+}
+
+func TestEdgeReverseProxyErrorHandlerDoesNotLeakBackendDetails(t *testing.T) {
+	t.Setenv("TEST_EDGE_CF_TOKEN", "unused-in-test")
+
+	unreachablePort := freePort(t) // nothing listens here
+	backendURL := fmt.Sprintf("http://127.0.0.1:%d", unreachablePort)
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	sitePort := freePort(t)
+	writeConfigYAML(t, configPath, freePort(t), "netflix", "test.example", sitePort, backendURL, nil)
+
+	store, err := config.LoadInitial(configPath)
+	if err != nil {
+		t.Fatalf("LoadInitial: %v", err)
+	}
+
+	m := edge.NewManagerForTesting(store, addon.NewRuntime(), fakeCertFunc())
+	m.Reconcile()
+
+	conn := dialTLSWithRetry(t, fmt.Sprintf("127.0.0.1:%d", sitePort), "test.example", 3*time.Second)
+	defer conn.Close()
+
+	fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: test.example\r\nConnection: close\r\n\r\n")
+	resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("status = %d, want 502", resp.StatusCode)
+	}
+	if strings.Contains(string(body), fmt.Sprintf("%d", unreachablePort)) {
+		t.Fatalf("client-visible error body %q leaks the backend's port", body)
+	}
+	if strings.Contains(string(body), "127.0.0.1") {
+		t.Fatalf("client-visible error body %q leaks the backend's address", body)
+	}
+}
+
+func TestEdgeManagerReconcileRestartsOnBackendChange(t *testing.T) {
+	t.Setenv("TEST_EDGE_CF_TOKEN", "unused-in-test")
+
+	backendA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("from-a"))
+	}))
+	defer backendA.Close()
+	backendB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte("from-b"))
+	}))
+	defer backendB.Close()
+
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "config.yaml")
+	sitePort := freePort(t)
+	writeConfigYAML(t, configPath, freePort(t), "netflix", "test.example", sitePort, backendA.URL, nil)
+
+	store, err := config.LoadInitial(configPath)
+	if err != nil {
+		t.Fatalf("LoadInitial: %v", err)
+	}
+
+	m := edge.NewManagerForTesting(store, addon.NewRuntime(), fakeCertFunc())
+	m.Reconcile()
+
+	get := func() string {
+		conn := dialTLSWithRetry(t, fmt.Sprintf("127.0.0.1:%d", sitePort), "test.example", 3*time.Second)
+		defer conn.Close()
+		fmt.Fprintf(conn, "GET / HTTP/1.1\r\nHost: test.example\r\nConnection: close\r\n\r\n")
+		resp, err := http.ReadResponse(bufio.NewReader(conn), nil)
+		if err != nil {
+			t.Fatalf("read response: %v", err)
+		}
+		defer resp.Body.Close()
+		body, _ := io.ReadAll(resp.Body)
+		return string(body)
+	}
+
+	if got := get(); got != "from-a" {
+		t.Fatalf("body = %q, want from-a", got)
+	}
+
+	// Same listen_addr and domain, only the backend changes — a hot reload
+	// must still pick this up.
+	future := time.Now().Add(time.Hour)
+	writeConfigYAML(t, configPath, freePort(t), "netflix", "test.example", sitePort, backendB.URL, nil)
+	os.Chtimes(configPath, future, future)
+	store.ReloadIfChanged()
+	m.Reconcile()
+
+	deadline := time.Now().Add(3 * time.Second)
+	var last string
+	for time.Now().Before(deadline) {
+		last = get()
+		if last == "from-b" {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if last != "from-b" {
+		t.Fatalf("body = %q, want from-b after backend-only config change picked up on reload", last)
 	}
 }
 

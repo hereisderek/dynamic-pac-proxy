@@ -384,8 +384,8 @@ func ValidateConfig(cfg FileConfig) error {
 		seenPorts[servePort] = "site:" + s.Name
 
 		backendURL, err := url.Parse(serve.Backend)
-		if serve.Backend == "" || err != nil || !backendURL.IsAbs() || (backendURL.Scheme != "http" && backendURL.Scheme != "https") {
-			return fmt.Errorf("sites[%d] (%s): serve.backend must be an absolute http(s) URL, got %q", i, s.Name, serve.Backend)
+		if serve.Backend == "" || err != nil || !backendURL.IsAbs() || (backendURL.Scheme != "http" && backendURL.Scheme != "https") || backendURL.Host == "" {
+			return fmt.Errorf("sites[%d] (%s): serve.backend must be an absolute http(s) URL with a host, got %q", i, s.Name, serve.Backend)
 		}
 
 		if serve.ACMEEmail == "" {

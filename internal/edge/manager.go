@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/url"
 	"path/filepath"
+	"reflect"
 	"sync"
 	"time"
 
@@ -30,6 +31,19 @@ import (
 // the rest of the daemon.
 const acmeTimeout = 2 * time.Minute
 
+// Edge listeners are directly reachable from the public internet, unlike
+// internal/proxy's LAN-only listeners — so, unlike those, they need their
+// own defense against a slow client holding a connection (and its
+// goroutine) open indefinitely by trickling in request headers.
+// ReadTimeout/WriteTimeout are deliberately left at their zero (unlimited)
+// default: this is a reverse proxy, and a hard cap on total
+// request/response duration would break large or long-lived
+// (streaming/SSE) backend responses, not just slow clients.
+const (
+	readHeaderTimeout = 10 * time.Second
+	idleTimeout       = 120 * time.Second
+)
+
 // CertFunc obtains a TLS config that presents a valid certificate for
 // serve.Domain, blocking until one is issued/renewed as needed. The real
 // implementation (certmagicSource.TLSConfig, wired in via getCertFunc)
@@ -43,8 +57,15 @@ type CertFunc func(ctx context.Context, serve *config.SiteServe) (*tls.Config, e
 type runningSite struct {
 	listenAddr string
 	domain     string
-	cancel     context.CancelFunc
-	server     *http.Server // nil until the listener is actually up
+	// site and addonsDir are exactly what this listener/reverse-proxy was
+	// built from — kept so Reconcile can tell a hot-reloaded change to
+	// anything captured at start time (backend, addons, ACME settings,
+	// credentials, the global addons_dir) apart from "nothing changed",
+	// not just a domain/listen_addr change.
+	site      config.SiteConfig
+	addonsDir string
+	cancel    context.CancelFunc
+	server    *http.Server // nil until the listener is actually up
 }
 
 // Manager owns the public HTTPS listener for every serve-enabled site,
@@ -55,8 +76,9 @@ type Manager struct {
 	cfgStore *config.Store
 	addons   *addon.Runtime
 
-	certFuncMu sync.Mutex
-	certFunc   CertFunc // nil means "not built yet"; see getCertFunc
+	certFuncMu  sync.Mutex
+	certFunc    CertFunc            // nil means "not built yet"; see getCertFunc
+	certRelease func(domain string) // nil for a testing certFunc with nothing to release
 
 	mu      sync.Mutex
 	running map[string]*runningSite // by site name
@@ -85,9 +107,24 @@ func (m *Manager) getCertFunc() CertFunc {
 	defer m.certFuncMu.Unlock()
 	if m.certFunc == nil {
 		cacheDir := filepath.Join(m.cfgStore.ConfigDir(), "acme-cache")
-		m.certFunc = newCertmagicSource(cacheDir).TLSConfig
+		source := newCertmagicSource(cacheDir)
+		m.certFunc = source.TLSConfig
+		m.certRelease = source.unmanage
 	}
 	return m.certFunc
+}
+
+// releaseCert tells the real certmagicSource (if one has been built) to
+// stop managing/renewing domain — called when a site is stopped or
+// rebuilt. A no-op under NewManagerForTesting, which has no real source to
+// release anything from.
+func (m *Manager) releaseCert(domain string) {
+	m.certFuncMu.Lock()
+	release := m.certRelease
+	m.certFuncMu.Unlock()
+	if release != nil {
+		release(domain)
+	}
 }
 
 // Reconcile starts a listener for any serve-enabled site in the current
@@ -96,6 +133,7 @@ func (m *Manager) getCertFunc() CertFunc {
 // listen_addr changed. Safe to call repeatedly.
 func (m *Manager) Reconcile() {
 	cfg := m.cfgStore.Snapshot()
+	addonsDir := m.cfgStore.AddonsDir()
 	wanted := make(map[string]config.SiteConfig, len(cfg.Sites))
 	for _, s := range cfg.Sites {
 		if s.Serve != nil {
@@ -112,15 +150,15 @@ func (m *Manager) Reconcile() {
 			m.stopLocked(name, rs, "removed from config or serve disabled")
 			continue
 		}
-		if s.Serve.ListenAddr != rs.listenAddr || s.Serve.Domain != rs.domain {
-			m.stopLocked(name, rs, "serve.listen_addr or serve.domain changed")
-			m.startLocked(name, s)
+		if !reflect.DeepEqual(rs.site, s) || rs.addonsDir != addonsDir {
+			m.stopLocked(name, rs, "site configuration changed")
+			m.startLocked(name, s, addonsDir)
 		}
 	}
 
 	for name, s := range wanted {
 		if _, ok := m.running[name]; !ok {
-			m.startLocked(name, s)
+			m.startLocked(name, s, addonsDir)
 		}
 	}
 }
@@ -131,6 +169,7 @@ func (m *Manager) stopLocked(name string, rs *runningSite, reason string) {
 		go rs.server.Close()
 	}
 	delete(m.running, name)
+	m.releaseCert(rs.domain)
 	log.Printf("site %q: stopped serving %s (%s)", name, rs.domain, reason)
 }
 
@@ -140,13 +179,19 @@ func (m *Manager) stopLocked(name string, rs *runningSite, reason string) {
 // site from starting. A site that fails to get a certificate or bind its
 // listener is simply retried on the next Reconcile() tick (the existing 3s
 // config-poll loop in main.go), not through any bespoke retry machinery.
-func (m *Manager) startLocked(name string, s config.SiteConfig) {
+func (m *Manager) startLocked(name string, s config.SiteConfig, addonsDir string) {
 	ctx, cancel := context.WithCancel(context.Background())
-	placeholder := &runningSite{listenAddr: s.Serve.ListenAddr, domain: s.Serve.Domain, cancel: cancel}
+	placeholder := &runningSite{
+		listenAddr: s.Serve.ListenAddr,
+		domain:     s.Serve.Domain,
+		site:       s,
+		addonsDir:  addonsDir,
+		cancel:     cancel,
+	}
 	m.running[name] = placeholder
 
 	go func() {
-		if err := m.startSite(ctx, name, s, placeholder); err != nil {
+		if err := m.startSite(ctx, name, s, addonsDir, placeholder); err != nil {
 			log.Printf("site %q: %v — will retry", name, err)
 			m.mu.Lock()
 			if m.running[name] == placeholder {
@@ -157,7 +202,7 @@ func (m *Manager) startLocked(name string, s config.SiteConfig) {
 	}()
 }
 
-func (m *Manager) startSite(ctx context.Context, name string, s config.SiteConfig, placeholder *runningSite) error {
+func (m *Manager) startSite(ctx context.Context, name string, s config.SiteConfig, addonsDir string, placeholder *runningSite) error {
 	acmeCtx, acmeCancel := context.WithTimeout(ctx, acmeTimeout)
 	defer acmeCancel()
 
@@ -178,8 +223,12 @@ func (m *Manager) startSite(ctx context.Context, name string, s config.SiteConfi
 		return fmt.Errorf("invalid backend %q: %w", s.Serve.Backend, err)
 	}
 
-	rp := newReverseProxy(name, backend, m.addons, m.cfgStore.AddonsDir(), s.Addons)
-	srv := &http.Server{Handler: rp}
+	rp := newReverseProxy(name, backend, m.addons, addonsDir, s.Addons)
+	srv := &http.Server{
+		Handler:           rp,
+		ReadHeaderTimeout: readHeaderTimeout,
+		IdleTimeout:       idleTimeout,
+	}
 
 	m.mu.Lock()
 	if m.running[name] != placeholder {
@@ -195,7 +244,13 @@ func (m *Manager) startSite(ctx context.Context, name string, s config.SiteConfi
 
 	log.Printf("site %q: serving https://%s on %s -> %s", name, s.Serve.Domain, s.Serve.ListenAddr, s.Serve.Backend)
 	if err := srv.Serve(tlsLn); err != nil && err != http.ErrServerClosed {
-		log.Printf("site %q: server on %s exited: %v", name, s.Serve.ListenAddr, err)
+		// An intentional stop (stopLocked) already removed this site from
+		// m.running before closing the listener, so this path is only
+		// reached by a real, unexpected failure — surface it so the
+		// caller drops the now-dead placeholder and Reconcile's next tick
+		// restarts the site, instead of leaving a placeholder that looks
+		// "running" forever with no listener behind it.
+		return fmt.Errorf("server on %s exited unexpectedly: %w", s.Serve.ListenAddr, err)
 	}
 	return nil
 }

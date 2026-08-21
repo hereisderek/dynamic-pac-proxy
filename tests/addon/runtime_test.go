@@ -1,6 +1,7 @@
 package addon_test
 
 import (
+	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
@@ -281,6 +282,110 @@ def request(flow):
 	if err := rt.RunRequest(dir, "badhost.star", req); err == nil {
 		t.Fatal("expected a network error from an unreachable host")
 	}
+}
+
+func TestRunRequestURLRewriteAndBadHeaderIsFullyTransactional(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "rewrite-then-fail.star", `
+def request(flow):
+    flow.request.url = "https://rewritten.example.com/new-path"
+    flow.request.headers["X-Bad"] = 123
+`)
+	rt := addon.NewRuntime()
+	req := newReq("GET", "http://example.com/old-path", "")
+
+	if err := rt.RunRequest(dir, "rewrite-then-fail.star", req); err == nil {
+		t.Fatal("expected an error from the invalid header value")
+	}
+	if got := req.URL.String(); got != "http://example.com/old-path" {
+		t.Fatalf("URL = %q, want the original URL untouched since apply() failed", got)
+	}
+	if req.Host != "example.com" {
+		t.Fatalf("Host = %q, want untouched (example.com)", req.Host)
+	}
+}
+
+func TestRunRequestURLRewriteRejectsRelativeURL(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "relative.star", `
+def request(flow):
+    flow.request.url = "/new-path"
+`)
+	rt := addon.NewRuntime()
+	req := newReq("GET", "http://example.com/old-path", "")
+
+	if err := rt.RunRequest(dir, "relative.star", req); err == nil {
+		t.Fatal("expected a relative rewritten URL (no host) to be rejected")
+	}
+	if got := req.URL.String(); got != "http://example.com/old-path" {
+		t.Fatalf("URL = %q, want untouched after the rejected rewrite", got)
+	}
+}
+
+func TestRunRequestDirectContentAssignClosesOriginalBody(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "replace.star", `
+def request(flow):
+    flow.request.text = "replaced"
+`)
+	rt := addon.NewRuntime()
+	req := newReq("POST", "http://example.com/", "original body")
+	closed := false
+	req.Body = &closeTrackingBody{ReadCloser: req.Body, onClose: func() { closed = true }}
+
+	if err := rt.RunRequest(dir, "replace.star", req); err != nil {
+		t.Fatalf("RunRequest: %v", err)
+	}
+	if !closed {
+		t.Fatal("original request body was never closed after a direct .text replacement")
+	}
+	body, _ := io.ReadAll(req.Body)
+	if string(body) != "replaced" {
+		t.Fatalf("body = %q, want %q", body, "replaced")
+	}
+}
+
+func TestRunResponseTextDecodesGzipAndDropsContentEncoding(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "gzip-edit.star", `
+def response(flow):
+    flow.response.text = flow.response.text.replace("ads", "")
+`)
+	var buf strings.Builder
+	gzw := gzip.NewWriter(&buf)
+	gzw.Write([]byte("hello ads world"))
+	gzw.Close()
+
+	rt := addon.NewRuntime()
+	resp := &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Encoding": []string{"gzip"}},
+		Body:       io.NopCloser(strings.NewReader(buf.String())),
+	}
+
+	if err := rt.RunResponse(dir, "gzip-edit.star", resp); err != nil {
+		t.Fatalf("RunResponse: %v", err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read body: %v", err)
+	}
+	if string(body) != "hello  world" {
+		t.Fatalf("body = %q, want decoded+edited plain text", body)
+	}
+	if got := resp.Header.Get("Content-Encoding"); got != "" {
+		t.Fatalf("Content-Encoding = %q, want stripped since the body is now plain", got)
+	}
+}
+
+type closeTrackingBody struct {
+	io.ReadCloser
+	onClose func()
+}
+
+func (b *closeTrackingBody) Close() error {
+	b.onClose()
+	return b.ReadCloser.Close()
 }
 
 func TestRunRequestConcurrent(t *testing.T) {

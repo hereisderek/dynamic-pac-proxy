@@ -102,3 +102,17 @@ func (s *certmagicSource) TLSConfig(ctx context.Context, serve *config.SiteServe
 	}
 	return cfg.TLSConfig(), nil
 }
+
+// unmanage undoes TLSConfig's registration for domain: it drops the
+// per-domain Config (so a future GetConfigForCert lookup for a stale
+// certificate that lingers in the cache fails loudly instead of silently
+// reusing a removed site's DNS credentials) and tells the shared Cache to
+// stop maintaining/renewing that domain's certificate outright. Without
+// this, a removed or renamed site's certificate would keep renewing with
+// its old credentials for the rest of the process's life.
+func (s *certmagicSource) unmanage(domain string) {
+	s.mu.Lock()
+	delete(s.configs, domain)
+	s.mu.Unlock()
+	s.cache.RemoveManaged([]certmagic.SubjectIssuer{{Subject: domain}})
+}

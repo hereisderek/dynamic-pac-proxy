@@ -2,12 +2,15 @@ package addon
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
 	"fmt"
 	"io"
 	"net/http"
 	"net/textproto"
 	"net/url"
 	"strconv"
+	"strings"
 
 	"go.starlark.net/starlark"
 )
@@ -65,6 +68,12 @@ type requestValue struct {
 	bodyLoaded bool
 	bodyDirty  bool
 	body       []byte
+	// bodyEncoding is the Content-Encoding loadBody transparently decoded
+	// away to produce body, or "" if the body was already identity-encoded
+	// (or never loaded). apply() uses it to drop a now-stale
+	// Content-Encoding header when the script committed a plain-decoded
+	// replacement body without touching headers itself.
+	bodyEncoding string
 }
 
 func newRequestValue(r *http.Request) *requestValue {
@@ -162,35 +171,69 @@ func (v *requestValue) loadBody() ([]byte, error) {
 	v.r.Body.Close()
 	// Restore a fresh reader over whatever was actually read, even on
 	// error, so a script that fails partway through doesn't leave the
-	// real request with an already-drained, now-unusable body.
+	// real request with an already-drained, now-unusable body. This
+	// restores the raw (still-encoded) bytes — decoding below only
+	// affects what the script sees via .text/.content, never the wire
+	// body unless the script actually commits a replacement.
 	v.r.Body = io.NopCloser(bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("read request body: %w", err)
 	}
-	v.body = data
-	return data, nil
+	decoded, enc, err := decodeBody(v.r.Header, data)
+	if err != nil {
+		return nil, fmt.Errorf("flow.request: %w", err)
+	}
+	v.body = decoded
+	v.bodyEncoding = enc
+	return decoded, nil
 }
 
 // apply writes any mutations back onto the real *http.Request. Only called
 // once the whole Starlark call for this addon has succeeded — a script
 // that errors partway through a mutation never leaves a half-applied
 // request in flight.
+//
+// Every fallible step (parsing the rewritten URL, validating the header
+// dict) is done before anything is written to the real request, so an
+// error here — e.g. an invalid header value — leaves v.r completely
+// untouched instead of partially rewritten.
 func (v *requestValue) apply() error {
-	if v.method != v.r.Method {
-		v.r.Method = v.method
+	newHeaders, err := buildHeaders(v.headers)
+	if err != nil {
+		return fmt.Errorf("flow.request.headers: %w", err)
 	}
-	if v.urlStr != v.r.URL.String() {
-		u, err := url.Parse(v.urlStr)
+
+	var newURL *url.URL
+	urlChanged := v.urlStr != v.r.URL.String()
+	if urlChanged {
+		newURL, err = url.Parse(v.urlStr)
 		if err != nil {
 			return fmt.Errorf("flow.request.url: invalid rewritten URL %q: %w", v.urlStr, err)
 		}
-		v.r.URL = u
-		v.r.Host = u.Host
+		if (newURL.Scheme != "http" && newURL.Scheme != "https") || newURL.Host == "" {
+			return fmt.Errorf("flow.request.url: rewritten URL %q must be an absolute http(s) URL with a host", v.urlStr)
+		}
 	}
-	if err := applyHeaders(v.r.Header, v.headers); err != nil {
-		return fmt.Errorf("flow.request.headers: %w", err)
+
+	if v.bodyDirty && v.bodyEncoding != "" && newHeaders.Get("Content-Encoding") == v.bodyEncoding {
+		// The script committed a plain-decoded body but never touched
+		// the still-stale Content-Encoding header itself — drop it so
+		// whatever sends this request on doesn't try to re-decode an
+		// already-decoded body.
+		newHeaders.Del("Content-Encoding")
 	}
+
+	// Nothing above can fail past this point — commit everything.
+	v.r.Method = v.method
+	if urlChanged {
+		v.r.URL = newURL
+		v.r.Host = newURL.Host
+	}
+	commitHeaders(v.r.Header, newHeaders)
 	if v.bodyDirty {
+		if v.r.Body != nil {
+			v.r.Body.Close()
+		}
 		v.r.Body = io.NopCloser(bytes.NewReader(v.body))
 		v.r.ContentLength = int64(len(v.body))
 		v.r.Header.Set("Content-Length", strconv.Itoa(len(v.body)))
@@ -205,9 +248,10 @@ type responseValue struct {
 	statusCode int
 	headers    *starlark.Dict
 
-	bodyLoaded bool
-	bodyDirty  bool
-	body       []byte
+	bodyLoaded   bool
+	bodyDirty    bool
+	body         []byte
+	bodyEncoding string // see requestValue.bodyEncoding
 }
 
 func newResponseValue(resp *http.Response) *responseValue {
@@ -300,21 +344,42 @@ func (v *responseValue) loadBody() ([]byte, error) {
 	// Same "restore a fresh reader over whatever was read" rule as
 	// requestValue.loadBody — a read error here must not leave the real
 	// response's body half-consumed for whatever sends it on afterward.
+	// This restores the raw (still-encoded) bytes; decoding below only
+	// affects what the script sees via .text/.content.
 	v.resp.Body = io.NopCloser(bytes.NewReader(data))
 	if err != nil {
 		return nil, fmt.Errorf("read response body: %w", err)
 	}
-	v.body = data
-	return data, nil
+	decoded, enc, err := decodeBody(v.resp.Header, data)
+	if err != nil {
+		return nil, fmt.Errorf("flow.response: %w", err)
+	}
+	v.body = decoded
+	v.bodyEncoding = enc
+	return decoded, nil
 }
 
+// apply is requestValue.apply's response counterpart: headers are fully
+// validated into a temporary before anything is written to the real
+// response, so an invalid header value can't leave status/headers/body
+// partially committed.
 func (v *responseValue) apply() error {
-	v.resp.StatusCode = v.statusCode
-	v.resp.Status = fmt.Sprintf("%d %s", v.statusCode, http.StatusText(v.statusCode))
-	if err := applyHeaders(v.resp.Header, v.headers); err != nil {
+	newHeaders, err := buildHeaders(v.headers)
+	if err != nil {
 		return fmt.Errorf("flow.response.headers: %w", err)
 	}
+
+	if v.bodyDirty && v.bodyEncoding != "" && newHeaders.Get("Content-Encoding") == v.bodyEncoding {
+		newHeaders.Del("Content-Encoding")
+	}
+
+	v.resp.StatusCode = v.statusCode
+	v.resp.Status = fmt.Sprintf("%d %s", v.statusCode, http.StatusText(v.statusCode))
+	commitHeaders(v.resp.Header, newHeaders)
 	if v.bodyDirty {
+		if v.resp.Body != nil {
+			v.resp.Body.Close()
+		}
 		v.resp.Body = io.NopCloser(bytes.NewReader(v.body))
 		v.resp.ContentLength = int64(len(v.body))
 		v.resp.Header.Set("Content-Length", strconv.Itoa(len(v.body)))
@@ -343,18 +408,18 @@ func headerToDict(h http.Header) *starlark.Dict {
 	return d
 }
 
-// applyHeaders rewrites h from scratch to match d — handles both additions
-// and deletions (a script doing `flow.request.headers.pop("X", None)` —
-// Starlark, unlike Python, has no `del` statement) for free, since it's a
-// full rebuild rather than a diff.
-func applyHeaders(h http.Header, d *starlark.Dict) error {
-	for k := range h {
-		delete(h, k)
-	}
+// buildHeaders validates d and returns a brand-new http.Header built from
+// it, without touching any real request/response header map — kept
+// separate from committing so a script that sets an invalid header value
+// (a script can mutate flow.*.headers[...] directly, bypassing SetField's
+// own checks) fails apply() before anything real is mutated, rather than
+// after some headers have already been cleared/rewritten.
+func buildHeaders(d *starlark.Dict) (http.Header, error) {
+	h := make(http.Header, d.Len())
 	for _, item := range d.Items() {
 		keyStr, ok := starlark.AsString(item[0])
 		if !ok {
-			return fmt.Errorf("header keys must be strings")
+			return nil, fmt.Errorf("header keys must be strings")
 		}
 		key := textproto.CanonicalMIMEHeaderKey(keyStr)
 		switch val := item[1].(type) {
@@ -368,7 +433,7 @@ func applyHeaders(h http.Header, d *starlark.Dict) error {
 				s, ok := starlark.AsString(elem)
 				if !ok {
 					iter.Done()
-					return fmt.Errorf("header %q: list values must be strings", key)
+					return nil, fmt.Errorf("header %q: list values must be strings", key)
 				}
 				if first {
 					h.Set(key, s)
@@ -379,8 +444,57 @@ func applyHeaders(h http.Header, d *starlark.Dict) error {
 			}
 			iter.Done()
 		default:
-			return fmt.Errorf("header %q: value must be a string or a list of strings", key)
+			return nil, fmt.Errorf("header %q: value must be a string or a list of strings", key)
 		}
 	}
-	return nil
+	return h, nil
+}
+
+// commitHeaders replaces h's contents with src, in place — h keeps its
+// identity (the real *http.Request/*http.Response's Header map), only its
+// contents change, and only once src has been fully built and validated.
+func commitHeaders(h http.Header, src http.Header) {
+	for k := range h {
+		delete(h, k)
+	}
+	for k, vals := range src {
+		h[k] = vals
+	}
+}
+
+// decodeBody transparently decodes raw according to header's
+// Content-Encoding, so flow.*.text/.content read the same bytes a client
+// would see after transport decompression instead of raw compressed bytes
+// masquerading as text. Returns the encoding it decoded (or "" for an
+// already-identity body) so apply() can drop a now-stale Content-Encoding
+// header when a script replaces the body without touching headers itself.
+// An encoding this daemon can't decode (e.g. br, zstd) fails loudly rather
+// than silently handing a script compressed bytes as "text".
+func decodeBody(header http.Header, raw []byte) (data []byte, encoding string, err error) {
+	enc := strings.ToLower(strings.TrimSpace(header.Get("Content-Encoding")))
+	switch enc {
+	case "", "identity":
+		return raw, "", nil
+	case "gzip":
+		zr, err := gzip.NewReader(bytes.NewReader(raw))
+		if err != nil {
+			return nil, "", fmt.Errorf("decode gzip body: %w", err)
+		}
+		defer zr.Close()
+		data, err := io.ReadAll(zr)
+		if err != nil {
+			return nil, "", fmt.Errorf("decode gzip body: %w", err)
+		}
+		return data, enc, nil
+	case "deflate":
+		zr := flate.NewReader(bytes.NewReader(raw))
+		defer zr.Close()
+		data, err := io.ReadAll(zr)
+		if err != nil {
+			return nil, "", fmt.Errorf("decode deflate body: %w", err)
+		}
+		return data, enc, nil
+	default:
+		return nil, "", fmt.Errorf("body has unsupported Content-Encoding %q; can't safely expose .text/.content", enc)
+	}
 }

@@ -154,6 +154,11 @@ func TestValidateConfigSites(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name:    "serve.backend with a scheme but no host is rejected",
+			mutate:  func(s config.SiteConfig) config.SiteConfig { s.Serve.Backend = "http:/no-host-path"; return s },
+			wantErr: true,
+		},
+		{
 			name:    "missing serve.acme_email",
 			mutate:  func(s config.SiteConfig) config.SiteConfig { s.Serve.ACMEEmail = ""; return s },
 			wantErr: true,

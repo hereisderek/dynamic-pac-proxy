@@ -68,9 +68,11 @@ func httpRequestBuiltin(thread *starlark.Thread, b *starlark.Builtin, args starl
 		return nil, fmt.Errorf("http_request: %w", err)
 	}
 	if headersDict != nil {
-		if err := applyHeaders(req.Header, headersDict); err != nil {
+		built, err := buildHeaders(headersDict)
+		if err != nil {
 			return nil, fmt.Errorf("http_request: headers: %w", err)
 		}
+		req.Header = built
 	}
 
 	resp, err := httpClient.Do(req)
