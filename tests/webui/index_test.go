@@ -16,8 +16,8 @@ func TestIndexHandlerListsPACURLs(t *testing.T) {
 		ListenAddr:    ":8080",
 		AdvertiseHost: "172.16.2.22",
 		Hosts: []config.HostConfig{
-			{Name: "derek-macbook", MDNSHostname: "dereks-MacBook-Pro.local", Port: 8888, ListenPort: 8081},
-			{Name: "mitmproxy-box", HostIP: "172.16.2.23", Port: 8080, ListenPort: 8083, InterceptSSL: true},
+			{Name: "derek-macbook", HostName: "dereks-MacBook-Pro.local", HostPort: 8888, ServerPort: 8081},
+			{Name: "mitmproxy-box", HostIP: "172.16.2.23", HostPort: 8080, ServerPort: 8083, InterceptSSL: true},
 		},
 	}, "/opt/dynamic-pac-proxy/config.yaml")
 
@@ -69,7 +69,7 @@ func TestIndexHandlerWithoutAdvertiseHost(t *testing.T) {
 	cfgStore := config.NewStore(config.FileConfig{
 		ListenAddr: ":8080",
 		Hosts: []config.HostConfig{
-			{Name: "derek-macbook", MDNSHostname: "dereks-MacBook-Pro.local", Port: 8888, ListenPort: 8081},
+			{Name: "derek-macbook", HostName: "dereks-MacBook-Pro.local", HostPort: 8888, ServerPort: 8081},
 		},
 	}, "/opt/dynamic-pac-proxy/config.yaml")
 

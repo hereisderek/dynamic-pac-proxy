@@ -49,14 +49,14 @@ var hostNamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]+$`)
 // an explicit (if silly) zero value.
 type HostConfig struct {
 	Name string `yaml:"name"`
-	// Exactly one of MDNSHostname or HostIP must be set — see
-	// ValidateConfig. HostIP skips mDNS resolution entirely, for hosts
-	// that already have a fixed address (e.g. a mitmproxy instance at a
-	// static LAN IP) or that don't answer mDNS at all.
-	MDNSHostname    string    `yaml:"mdns_hostname,omitempty"`
+	// Exactly one of HostName or HostIP must be set — see ValidateConfig.
+	// HostIP skips mDNS resolution entirely, for hosts that already have
+	// a fixed address (e.g. a mitmproxy instance at a static LAN IP) or
+	// that don't answer mDNS at all.
+	HostName        string    `yaml:"host_name,omitempty"`
 	HostIP          string    `yaml:"host_ip,omitempty"`
-	Port            int       `yaml:"port"`
-	ListenPort      int       `yaml:"listen_port"`
+	HostPort        int       `yaml:"host_port"`
+	ServerPort      int       `yaml:"server_port"`
 	RefreshInterval *Duration `yaml:"refresh_interval,omitempty"`
 	MDNSTimeout     *Duration `yaml:"mdns_timeout,omitempty"`
 	DialTimeout     *Duration `yaml:"dial_timeout,omitempty"`
@@ -70,23 +70,23 @@ type HostConfig struct {
 	InterceptSSL bool `yaml:"intercept_ssl,omitempty"`
 }
 
-// Target returns whichever of MDNSHostname or HostIP is set — the address
+// Target returns whichever of HostName or HostIP is set — the address
 // this host is actually resolved/dialed at, for display purposes (logs,
 // /status). ValidateConfig guarantees exactly one of them is set.
 func (h HostConfig) Target() string {
 	if h.HostIP != "" {
 		return h.HostIP
 	}
-	return h.MDNSHostname
+	return h.HostName
 }
 
 // EffectiveHost is a HostConfig with all the global defaults resolved in.
 type EffectiveHost struct {
 	Name            string
-	MDNSHostname    string
+	HostName        string
 	HostIP          string
-	Port            int
-	ListenPort      int
+	HostPort        int
+	ServerPort      int
 	RefreshInterval time.Duration
 	MDNSTimeout     time.Duration
 	DialTimeout     time.Duration
@@ -120,10 +120,10 @@ func (c FileConfig) Effective(h HostConfig) EffectiveHost {
 	}
 	return EffectiveHost{
 		Name:            h.Name,
-		MDNSHostname:    h.MDNSHostname,
+		HostName:        h.HostName,
 		HostIP:          h.HostIP,
-		Port:            h.Port,
-		ListenPort:      h.ListenPort,
+		HostPort:        h.HostPort,
+		ServerPort:      h.ServerPort,
 		RefreshInterval: ri.Duration(),
 		MDNSTimeout:     mt.Duration(),
 		DialTimeout:     dt.Duration(),
@@ -149,7 +149,7 @@ func DefaultConfig() FileConfig {
 		DialTimeout:     Duration(1 * time.Second),
 		FailureCooldown: Duration(5 * time.Second),
 		Hosts: []HostConfig{
-			{Name: "dereks-macbook", MDNSHostname: "dereks-MacBook-Pro.local", Port: 8888, ListenPort: 8081},
+			{Name: "dereks-macbook", HostName: "dereks-MacBook-Pro.local", HostPort: 8888, ServerPort: 8081},
 		},
 	}
 }
@@ -210,28 +210,28 @@ func ValidateConfig(cfg FileConfig) error {
 			return fmt.Errorf("hosts[%d]: duplicate name %q", i, h.Name)
 		}
 		seenNames[h.Name] = true
-		if h.MDNSHostname == "" && h.HostIP == "" {
-			return fmt.Errorf("hosts[%d] (%s): either mdns_hostname or host_ip is required", i, h.Name)
+		if h.HostName == "" && h.HostIP == "" {
+			return fmt.Errorf("hosts[%d] (%s): either host_name or host_ip is required", i, h.Name)
 		}
-		if h.MDNSHostname != "" && h.HostIP != "" {
-			return fmt.Errorf("hosts[%d] (%s): mdns_hostname and host_ip are mutually exclusive — set only one", i, h.Name)
+		if h.HostName != "" && h.HostIP != "" {
+			return fmt.Errorf("hosts[%d] (%s): host_name and host_ip are mutually exclusive — set only one", i, h.Name)
 		}
 		if h.HostIP != "" && net.ParseIP(h.HostIP) == nil {
 			return fmt.Errorf("hosts[%d] (%s): host_ip %q is not a valid IP address", i, h.Name, h.HostIP)
 		}
-		if h.Port < 1 || h.Port > 65535 {
-			return fmt.Errorf("hosts[%d] (%s): port must be between 1 and 65535, got %d", i, h.Name, h.Port)
+		if h.HostPort < 1 || h.HostPort > 65535 {
+			return fmt.Errorf("hosts[%d] (%s): host_port must be between 1 and 65535, got %d", i, h.Name, h.HostPort)
 		}
-		if h.ListenPort < 1 || h.ListenPort > 65535 {
-			return fmt.Errorf("hosts[%d] (%s): listen_port must be between 1 and 65535, got %d", i, h.Name, h.ListenPort)
+		if h.ServerPort < 1 || h.ServerPort > 65535 {
+			return fmt.Errorf("hosts[%d] (%s): server_port must be between 1 and 65535, got %d", i, h.Name, h.ServerPort)
 		}
-		if h.ListenPort == listenAddrPort {
-			return fmt.Errorf("hosts[%d] (%s): listen_port %d collides with listen_addr's port", i, h.Name, h.ListenPort)
+		if h.ServerPort == listenAddrPort {
+			return fmt.Errorf("hosts[%d] (%s): server_port %d collides with listen_addr's port", i, h.Name, h.ServerPort)
 		}
-		if other, ok := seenPorts[h.ListenPort]; ok {
-			return fmt.Errorf("hosts[%d] (%s): listen_port %d is already used by host %q", i, h.Name, h.ListenPort, other)
+		if other, ok := seenPorts[h.ServerPort]; ok {
+			return fmt.Errorf("hosts[%d] (%s): server_port %d is already used by host %q", i, h.Name, h.ServerPort, other)
 		}
-		seenPorts[h.ListenPort] = h.Name
+		seenPorts[h.ServerPort] = h.Name
 	}
 	return nil
 }

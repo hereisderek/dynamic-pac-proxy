@@ -50,8 +50,8 @@ packages).
 - **`internal/config`** — YAML schema (`FileConfig`/`HostConfig`), a custom
   `Duration` type so YAML holds `"15s"` strings instead of raw nanoseconds,
   `EffectiveHost` (per-host overrides merged onto global defaults), and
-  `ValidateConfig` (unique host names, port/listen_port ranges,
-  `listen_port` collisions against other hosts and against `listen_addr`).
+  `ValidateConfig` (unique host names, host_port/server_port ranges,
+  `server_port` collisions against other hosts and against `listen_addr`).
   `Store` hot-reloads on mtime change but keeps the last known-good config
   if a reload fails to parse/validate — a bad edit is logged, never fatal,
   once the service is already running. Also owns `ResolveConfigPath` (flag
@@ -65,7 +65,7 @@ packages).
   the live config on every CONNECT rather than merged into
   `EffectiveHost`, since it has no top-level default to inherit — see
   `internal/proxy`. Each host identifies its target with exactly one of
-  `MDNSHostname` or `HostIP` (`ValidateConfig` rejects both-set and
+  `HostName` or `HostIP` (`ValidateConfig` rejects both-set and
   neither-set); `HostConfig.Target()` returns whichever is set, for
   display (logs, `/status`) — see `internal/health` for where the actual
   branch (resolve vs. skip straight to dialing) happens.
@@ -145,16 +145,21 @@ packages).
 - **`internal/webui`** — the auxiliary HTTP endpoints, as opposed to the
   per-host proxy ports in `internal/proxy`:
   - `index.go`: `IndexHandler` serves `/` — one entry per host with its
-    PAC URL and manual `advertise_host:listen_port` address, built from
+    PAC URL and manual `advertise_host:server_port` address, built from
     `config.PortFromAddr(cfg.ListenAddr)` plus `HostConfig.Target()`. It
     only matches the exact root path itself and 404s otherwise, since
     `http.ServeMux` treats a registered `"/"` as a catch-all for every
     unmatched path — without that check, a typo'd URL would silently
     render this page instead of 404ing.
   - `pac.go`: `BuildPAC` is static: always
-    `PROXY advertise_host:listen_port; DIRECT`. `WriteStatusJSON` also
+    `PROXY advertise_host:server_port; DIRECT`. `WriteStatusJSON` also
     forces a fresh health check per host when called — hitting `/status`
-    counts as "a request came in" for the lazy-check design.
+    counts as "a request came in" for the lazy-check design. `HostStatus`'s
+    JSON fields (`host_port`/`server_port`) intentionally mirror the
+    config's own field names — nothing outside this repo depends on the
+    older `port`/`listen_port` names (checked against the openwrt LuCI
+    app's live-status JS, which only reads `name`/`hostname`/
+    `resolved_ip`/`reachable`/`last_check`/`error`).
   - `certs.go`: `CertsIndexHandler`/`CertsFileHandler` serve `/certs` — a
     page listing whatever certificate files are in the config's certs
     directory (see `internal/config.ResolveCertsDir`), with per-platform
@@ -196,7 +201,7 @@ should not accidentally regress it:
   own **fixed** address, and this box does the real-time reachability
   decision on every request via `internal/proxy`. Don't move that
   decision back into the PAC.
-- **Each host gets its own dedicated `listen_port`**, not a shared port.
+- **Each host gets its own dedicated `server_port`**, not a shared port.
   There used to be a combined `/proxy.pac` ("first reachable host in
   config order wins"); it was removed when per-host dedicated ports were
   chosen, because at that point it no longer had a coherent meaning (each
@@ -217,7 +222,7 @@ should not accidentally regress it:
   crossing an LXC's NAT/routed subnet) for a specific host, without
   needing an mDNS reflector on the whole network. It's deliberately
   exactly one extra field, not a second resolution mechanism living
-  alongside `mdns_hostname` with its own timeout/retry semantics —
+  alongside `host_name` with its own timeout/retry semantics —
   `checkHost()` just skips resolution and dials the parsed IP directly.
 
 ## Current deployment
@@ -233,4 +238,13 @@ should not accidentally regress it:
   `rc-service dynamic-pac-proxy restart`.
 - The proxied machine: a Mac at `dereks-MacBook-Pro.local` running Charles
   on port `8888`, configured in `hosts:` as `derek-macbook` with
-  `listen_port: 8081`.
+  `server_port: 8081`.
+- **Pending migration**: the box's live `/opt/dynamic-pac-proxy/config.yaml`
+  (as of the last deploy) still uses the pre-rename field names
+  (`mdns_hostname`/`port`/`listen_port`). A newer binary parses those as
+  unknown keys — `host_name`/`host_ip` both end up empty, which
+  `ValidateConfig` rejects, so the service **fails to start** on the next
+  restart until that file is rewritten with `host_name`/`host_port`/
+  `server_port`. Rewrite it (by hand or `scp`'d from an updated
+  `deploy/config.yaml`) in the same deploy that ships the new binary —
+  don't just swap the binary alone.

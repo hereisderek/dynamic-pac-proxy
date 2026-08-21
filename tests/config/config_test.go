@@ -18,7 +18,7 @@ func baseFileConfig(h config.HostConfig) config.FileConfig {
 }
 
 func TestValidateConfigHostIdentity(t *testing.T) {
-	valid := config.HostConfig{Name: "host", Port: 8888, ListenPort: 8081}
+	valid := config.HostConfig{Name: "host", HostPort: 8888, ServerPort: 8081}
 
 	cases := []struct {
 		name    string
@@ -26,8 +26,8 @@ func TestValidateConfigHostIdentity(t *testing.T) {
 		wantErr bool
 	}{
 		{
-			name: "mdns_hostname alone is valid",
-			host: func() config.HostConfig { h := valid; h.MDNSHostname = "some-machine.local"; return h }(),
+			name: "host_name alone is valid",
+			host: func() config.HostConfig { h := valid; h.HostName = "some-machine.local"; return h }(),
 		},
 		{
 			name: "host_ip alone is valid",
@@ -42,7 +42,7 @@ func TestValidateConfigHostIdentity(t *testing.T) {
 			name: "both set is invalid",
 			host: func() config.HostConfig {
 				h := valid
-				h.MDNSHostname = "some-machine.local"
+				h.HostName = "some-machine.local"
 				h.HostIP = "172.16.2.23"
 				return h
 			}(),
@@ -74,8 +74,8 @@ func TestValidateConfigHostIdentity(t *testing.T) {
 }
 
 func TestHostConfigTarget(t *testing.T) {
-	if got := (config.HostConfig{MDNSHostname: "some-machine.local"}).Target(); got != "some-machine.local" {
-		t.Fatalf("Target() = %q, want mdns_hostname value", got)
+	if got := (config.HostConfig{HostName: "some-machine.local"}).Target(); got != "some-machine.local" {
+		t.Fatalf("Target() = %q, want host_name value", got)
 	}
 	if got := (config.HostConfig{HostIP: "172.16.2.23"}).Target(); got != "172.16.2.23" {
 		t.Fatalf("Target() = %q, want host_ip value", got)

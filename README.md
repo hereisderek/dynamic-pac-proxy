@@ -17,7 +17,7 @@ box, which makes the online/offline call itself, per request, in real time.
 
 ## How it works
 
-- Each host in `hosts:` gets a dedicated `listen_port` on this box. A
+- Each host in `hosts:` gets a dedicated `server_port` on this box. A
   request arriving on that port is handled as a real forward proxy:
   - **CONNECT** (HTTPS): the client connection is hijacked, an upstream
     tunnel is established — chained through Charles with our own CONNECT
@@ -47,7 +47,7 @@ box, which makes the online/offline call itself, per request, in real time.
   proxy address, so you don't have to construct them by hand — see
   "Point a device at it" below.
 - `GET /proxy/<name>.pac` — a PAC file pointing at this box's own fixed
-  `advertise_host:listen_port` for that host. Static: it never needs to
+  `advertise_host:server_port` for that host. Static: it never needs to
   change, since reachability is handled behind it, not by it.
 - `GET /status` — JSON array, one entry per host, with its last resolved
   IP, reachability, and last error. Querying it also counts as "a request
@@ -139,28 +139,28 @@ failure_cooldown: 5s
 
 hosts:
   - name: derek-macbook
-    mdns_hostname: dereks-MacBook-Pro.local
-    port: 8888        # Charles's port on that Mac
-    listen_port: 8081  # THIS box's fixed port for that host
+    host_name: dereks-MacBook-Pro.local
+    host_port: 8888    # Charles's port on that Mac
+    server_port: 8081  # THIS box's fixed port for that host
 
   - name: office-pc
-    mdns_hostname: office-desktop.local
-    port: 9999
-    listen_port: 8082
+    host_name: office-desktop.local
+    host_port: 9999
+    server_port: 8082
     refresh_interval: 5s   # optional per-host override
     dial_timeout: 500ms    # optional per-host override
 
   - name: mitmproxy-box
-    host_ip: "172.16.2.23"   # fixed IP instead of mdns_hostname — see below
-    port: 8080
-    listen_port: 8083
+    host_ip: "172.16.2.23"   # fixed IP instead of host_name — see below
+    host_port: 8080
+    server_port: 8083
 ```
 
 Top-level fields:
 
 | Field              | Default          | Meaning                                              |
 |---------------------|------------------|----------------------------------------------------|
-| `listen_addr`       | `:8080`          | Where the HTTP status/PAC server listens (not the proxy ports — see `listen_port` below) |
+| `listen_addr`       | `:8080`          | Where the HTTP status/PAC server listens (not the proxy ports — see `server_port` below) |
 | `advertise_host`    | auto-detected LAN IP | The address baked into PAC files at `/proxy/<name>.pac`; set explicitly if the auto-detected guess isn't what devices can actually reach (e.g. multi-homed box) |
 | `refresh_interval`  | `15s`            | Default health-check cache TTL for hosts that don't override it |
 | `mdns_timeout`      | `2s`             | Default mDNS reply timeout for hosts that don't override (unused for `host_ip` hosts — nothing to resolve) |
@@ -174,10 +174,10 @@ Each entry in `hosts`:
 | Field              | Required | Meaning                                                |
 |---------------------|----------|-----------------------------------------------------------|
 | `name`              | yes      | Identifier used in URLs/status (`[a-zA-Z0-9_-]+`, unique)|
-| `mdns_hostname`     | one of these two | Bonjour hostname to resolve, e.g. `some-machine.local` |
+| `host_name`         | one of these two | Bonjour hostname to resolve, e.g. `some-machine.local` |
 | `host_ip`           | one of these two | Fixed IP instead of a Bonjour hostname — skips mDNS resolution entirely. Use this for a machine with a static/reserved address, or one that doesn't answer mDNS at all (e.g. a [mitmproxy](https://mitmproxy.org) instance) |
-| `port`              | yes      | The port Charles (or whatever proxy) listens on, on that host |
-| `listen_port`       | yes      | The fixed port **this box** listens on for this host — point devices here. Must be unique across hosts and different from `listen_addr`'s port |
+| `host_port`         | yes      | The port Charles (or whatever proxy) listens on, on that host |
+| `server_port`       | yes      | The fixed port **this box** listens on for this host — point devices here. Must be unique across hosts and different from `listen_addr`'s port |
 | `refresh_interval`  | no       | Overrides the top-level default for this host only       |
 | `mdns_timeout`      | no       | Overrides the top-level default for this host only       |
 | `dial_timeout`      | no       | Overrides the top-level default for this host only       |
@@ -188,7 +188,7 @@ Each entry in `hosts`:
 settings), or the top-level defaults, takes effect within a few seconds
 automatically — no restart needed. Adding a host starts a new proxy
 listener for it; removing one stops its listener and drops it from
-`/status`; changing `listen_port` rebinds it to the new port. Only the
+`/status`; changing `server_port` rebinds it to the new port. Only the
 top-level `listen_addr` (the status/PAC server, not the per-host proxy
 ports) needs a restart to take effect — see "Deploy as an auto-start
 service" below.
@@ -196,11 +196,11 @@ service" below.
 If the config file doesn't exist at startup, the service runs with a
 single built-in default host and logs that it did so. If the file exists
 but fails to parse or validate at startup (e.g. a duplicate `name`, a
-`port`/`listen_port` out of range, a `listen_port` collision between two
-hosts or with `listen_addr`, an empty `hosts` list), the service refuses
-to start — fail fast rather than run with an unintended config. Once
-running, a bad edit (e.g. a YAML typo) is logged and ignored — the service
-keeps using the last known-good config instead of crashing.
+`host_port`/`server_port` out of range, a `server_port` collision between
+two hosts or with `listen_addr`, an empty `hosts` list), the service
+refuses to start — fail fast rather than run with an unintended config.
+Once running, a bad edit (e.g. a YAML typo) is logged and ignored — the
+service keeps using the last known-good config instead of crashing.
 
 ## Deploy as an auto-start service
 
@@ -367,7 +367,7 @@ ssh root@<router> 'service dynamic-pac-proxy status; logread | grep dynamic-pac-
 If devices on the LAN can't reach the proxy port, check the firewall zone
 the router's LAN interface is in — `uci show firewall` — the default LAN
 zone's input policy is normally `ACCEPT`, but a hardened config may need
-an explicit rule opening the `listen_addr`/`listen_port`s to the LAN zone.
+an explicit rule opening the `listen_addr`/`server_port`s to the LAN zone.
 
 #### Anything else
 
@@ -398,11 +398,11 @@ setup) — if the container is instead behind NAT (e.g. a separate routed
 subnet), multicast won't reach it and resolution will fail. In that case
 you'd need an mDNS reflector/repeater on the network, or sidestep mDNS
 entirely for that host by giving it a static IP / DHCP reservation and
-using `host_ip` instead of `mdns_hostname` in its config entry.
+using `host_ip` instead of `host_name` in its config entry.
 
 ## Point a device at it
 
-Either configure the device's proxy manually with `advertise_host:listen_port`
+Either configure the device's proxy manually with `advertise_host:server_port`
 (e.g. `192.168.1.50:8081`), or use "Automatic Proxy Configuration" / PAC URL
 pointed at:
 
@@ -412,7 +412,7 @@ http://<lxc-host-ip>:8080/proxy/<name>.pac
 
 Visit `http://<lxc-host-ip>:8080/` for a page listing both of these,
 already filled in, for every configured host — no need to construct
-either URL by hand or remember each host's `listen_port`.
+either URL by hand or remember each host's `server_port`.
 
 Either way, this is a one-time setup: the address never needs to be
 re-fetched or changed. Whether Charles is currently reachable is decided

@@ -91,7 +91,7 @@ func main() {
 			return
 		}
 		w.Header().Set("Content-Type", "application/x-ns-proxy-autoconfig")
-		w.Write([]byte(webui.BuildPAC(cfg.AdvertiseHost, h.ListenPort)))
+		w.Write([]byte(webui.BuildPAC(cfg.AdvertiseHost, h.ServerPort)))
 	})
 
 	mux.HandleFunc("/status", func(w http.ResponseWriter, r *http.Request) {

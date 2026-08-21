@@ -90,7 +90,7 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 		DialTimeout:     config.Duration(2 * time.Second),
 		FailureCooldown: config.Duration(5 * time.Second),
 		Hosts: []config.HostConfig{
-			{Name: "test-host", MDNSHostname: "unused.local", Port: charlesPort, ListenPort: 0},
+			{Name: "test-host", HostName: "unused.local", HostPort: charlesPort, ServerPort: 0},
 		},
 	}, "")
 
@@ -113,7 +113,7 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 
 	t.Run("chained plain HTTP via fake Charles", func(t *testing.T) {
 		states.Get("test-host").SetSnapshot(health.Snapshot{
-			IP: net.ParseIP(charlesIP), Port: charlesPort, Reachable: true, LastCheck: time.Now(),
+			IP: net.ParseIP(charlesIP), HostPort: charlesPort, Reachable: true, LastCheck: time.Now(),
 		})
 		resp, err := client.Get(origin.URL)
 		if err != nil {
@@ -128,7 +128,7 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 
 	t.Run("chained CONNECT (HTTPS) via fake Charles", func(t *testing.T) {
 		states.Get("test-host").SetSnapshot(health.Snapshot{
-			IP: net.ParseIP(charlesIP), Port: charlesPort, Reachable: true, LastCheck: time.Now(),
+			IP: net.ParseIP(charlesIP), HostPort: charlesPort, Reachable: true, LastCheck: time.Now(),
 		})
 		resp, err := client.Get(tlsOrigin.URL)
 		if err != nil {
@@ -178,7 +178,7 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 		deadLn.Close()
 
 		states.Get("test-host").SetSnapshot(health.Snapshot{
-			IP: net.ParseIP("127.0.0.1"), Port: deadPort, Reachable: true, LastCheck: time.Now(),
+			IP: net.ParseIP("127.0.0.1"), HostPort: deadPort, Reachable: true, LastCheck: time.Now(),
 		})
 		resp, err := client.Get(tlsOrigin.URL)
 		if err != nil {
@@ -202,7 +202,7 @@ func TestForwardProxyChainedAndDirect(t *testing.T) {
 		deadLn.Close()
 
 		states.Get("test-host").SetSnapshot(health.Snapshot{
-			IP: net.ParseIP("127.0.0.1"), Port: deadPort, Reachable: true, LastCheck: time.Now(),
+			IP: net.ParseIP("127.0.0.1"), HostPort: deadPort, Reachable: true, LastCheck: time.Now(),
 		})
 		resp, err := client.Get(origin.URL)
 		if err != nil {
@@ -269,7 +269,7 @@ func TestInterceptSSL(t *testing.T) {
 		DialTimeout:     config.Duration(2 * time.Second),
 		FailureCooldown: config.Duration(5 * time.Second),
 		Hosts: []config.HostConfig{
-			{Name: "intercept-host", MDNSHostname: "unused.local", Port: 1, ListenPort: 0, InterceptSSL: true},
+			{Name: "intercept-host", HostName: "unused.local", HostPort: 1, ServerPort: 0, InterceptSSL: true},
 		},
 	}, filepath.Join(base, "config.yaml"))
 

@@ -39,27 +39,27 @@ host_count=0
 
 emit_host() {
 	local section="$1"
-	local name mdns_hostname port listen_port ri mt dt fc
+	local name host_name host_port server_port ri mt dt fc
 
 	config_get name "$section" name ""
-	config_get mdns_hostname "$section" mdns_hostname ""
-	config_get port "$section" port ""
-	config_get listen_port "$section" listen_port ""
+	config_get host_name "$section" host_name ""
+	config_get host_port "$section" host_port ""
+	config_get server_port "$section" server_port ""
 	config_get ri "$section" refresh_interval ""
 	config_get mt "$section" mdns_timeout ""
 	config_get dt "$section" dial_timeout ""
 	config_get fc "$section" failure_cooldown ""
 
-	if [ -z "$name" ] || [ -z "$mdns_hostname" ] || [ -z "$port" ] || [ -z "$listen_port" ]; then
-		logger -t dynamic-pac-proxy "skipping incomplete host section '$section' (name/mdns_hostname/port/listen_port all required)"
+	if [ -z "$name" ] || [ -z "$host_name" ] || [ -z "$host_port" ] || [ -z "$server_port" ]; then
+		logger -t dynamic-pac-proxy "skipping incomplete host section '$section' (name/host_name/host_port/server_port all required)"
 		return
 	fi
 
 	{
 		echo "  - name: \"$name\""
-		echo "    mdns_hostname: \"$mdns_hostname\""
-		echo "    port: $port"
-		echo "    listen_port: $listen_port"
+		echo "    host_name: \"$host_name\""
+		echo "    host_port: $host_port"
+		echo "    server_port: $server_port"
 		[ -n "$ri" ] && echo "    refresh_interval: $ri"
 		[ -n "$mt" ] && echo "    mdns_timeout: $mt"
 		[ -n "$dt" ] && echo "    dial_timeout: $dt"

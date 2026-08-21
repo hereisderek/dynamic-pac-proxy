@@ -20,7 +20,7 @@ import (
 type Snapshot struct {
 	Hostname  string
 	IP        net.IP
-	Port      int
+	HostPort  int
 	Reachable bool
 	LastCheck time.Time
 	LastError string
@@ -33,7 +33,7 @@ func isFresh(snap Snapshot, ttl time.Duration) bool {
 // checkHost does the actual resolve (mDNS, or none at all for a fixed
 // host_ip) + TCP dial for one host.
 func checkHost(eff config.EffectiveHost) Snapshot {
-	displayName := eff.MDNSHostname
+	displayName := eff.HostName
 	if displayName == "" {
 		displayName = eff.HostIP
 	}
@@ -43,20 +43,20 @@ func checkHost(eff config.EffectiveHost) Snapshot {
 		// host_ip is validated at config-parse time, so this always parses.
 		ip = net.ParseIP(eff.HostIP)
 	} else {
-		resolved, err := mdns.ResolveA(eff.MDNSHostname, eff.MDNSTimeout)
+		resolved, err := mdns.ResolveA(eff.HostName, eff.MDNSTimeout)
 		if err != nil {
-			return Snapshot{Hostname: displayName, Port: eff.Port, LastCheck: time.Now(), LastError: "mdns: " + err.Error()}
+			return Snapshot{Hostname: displayName, HostPort: eff.HostPort, LastCheck: time.Now(), LastError: "mdns: " + err.Error()}
 		}
 		ip = resolved
 	}
 
-	addr := net.JoinHostPort(ip.String(), strconv.Itoa(eff.Port))
+	addr := net.JoinHostPort(ip.String(), strconv.Itoa(eff.HostPort))
 	conn, dialErr := net.DialTimeout("tcp", addr, eff.DialTimeout)
 	if dialErr != nil {
-		return Snapshot{Hostname: displayName, IP: ip, Port: eff.Port, LastCheck: time.Now(), LastError: "dial: " + dialErr.Error()}
+		return Snapshot{Hostname: displayName, IP: ip, HostPort: eff.HostPort, LastCheck: time.Now(), LastError: "dial: " + dialErr.Error()}
 	}
 	conn.Close()
-	return Snapshot{Hostname: displayName, IP: ip, Port: eff.Port, Reachable: true, LastCheck: time.Now()}
+	return Snapshot{Hostname: displayName, IP: ip, HostPort: eff.HostPort, Reachable: true, LastCheck: time.Now()}
 }
 
 // State is one host's health cache. Checks happen lazily: GetFresh only

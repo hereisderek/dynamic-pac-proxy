@@ -15,8 +15,8 @@ import (
 func TestLazyHealthCheckTTL(t *testing.T) {
 	eff := config.EffectiveHost{
 		Name:            "ttl-host",
-		MDNSHostname:    "definitely-does-not-exist.local",
-		Port:            9999,
+		HostName:        "definitely-does-not-exist.local",
+		HostPort:        9999,
 		RefreshInterval: 300 * time.Millisecond,
 		MDNSTimeout:     150 * time.Millisecond,
 		DialTimeout:     150 * time.Millisecond,
@@ -92,7 +92,7 @@ func TestHostIPSkipsMDNS(t *testing.T) {
 	eff := config.EffectiveHost{
 		Name:        "fixed-ip-host",
 		HostIP:      "127.0.0.1",
-		Port:        port,
+		HostPort:    port,
 		MDNSTimeout: 5 * time.Second, // would dominate elapsed time if (wrongly) used
 		DialTimeout: time.Second,
 	}
