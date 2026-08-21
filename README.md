@@ -167,7 +167,9 @@ Top-level fields:
 | `dial_timeout`      | `1s`             | Default TCP dial timeout for hosts that don't override |
 | `failure_cooldown`  | `5s`             | Default minimum spacing between failure-triggered early rechecks, for hosts that don't override |
 | `certs_dir`         | a `certs` folder next to `config.yaml` | Directory served at `/certs` for downloading/installing Charles's SSL certificate — see "SSL certificates" below |
+| `addons_dir`        | an `addons` folder next to `config.yaml` | Directory `sites[].addons` script paths are resolved relative to — see "Sites: public reverse-proxy mirrors" below |
 | `hosts`             | (one host, see `deploy/config.yaml`) | The list of hosts to proxy for |
+| `sites`             | (none)           | Optional list of addon-scripted reverse-proxy mirrors — see "Sites: public reverse-proxy mirrors" below |
 
 Each entry in `hosts`:
 
@@ -515,3 +517,124 @@ need re-trusting after a fresh install.
   client would — this tool verifies the real destination's certificate
   against the normal system trust store on the outbound leg; it doesn't
   weaken that check.
+
+## Sites: public reverse-proxy mirrors with addon scripts
+
+A `sites:` entry with a `serve:` block turns this daemon into a standalone,
+publicly-reachable HTTPS reverse-proxy for a domain **you actually own**
+(unlike `intercept_ssl` above, which only works for domains you don't own
+because it relies on a locally-trusted CA) — fronted by a real Let's
+Encrypt certificate, forwarding to a real upstream, with small "addon"
+scripts able to rewrite the request/response in transit (inject headers,
+rewrite body content, etc.).
+
+```yaml
+sites:
+  - name: netflix
+    addons:
+      - "netflix/cookie.star"   # relative to addons_dir; run in order for requests, reverse order for responses
+    serve:
+      domain: netflix.mydomain.com   # a domain you own — the ACME cert's SAN and expected SNI
+      listen_addr: ":8443"           # where THIS daemon binds — see "Network topology" below
+      backend: "https://www.netflix.com"
+      acme_email: you@mydomain.com
+      dns_provider: cloudflare
+      cloudflare:
+        api_token_env: "CLOUDFLARE_API_TOKEN"   # names an env var — never put the token itself here
+```
+
+Each entry in `sites`:
+
+| Field                        | Required | Meaning |
+|------------------------------|----------|---------|
+| `name`                       | yes      | Identifier (`[a-zA-Z0-9_-]+`, unique) |
+| `addons`                     | no       | Addon script paths, relative to `addons_dir` — see "Addon scripts" below |
+| `serve.domain`                | yes*     | The public domain this site serves — a domain you own and control DNS for |
+| `serve.listen_addr`           | yes*     | Where this daemon binds for this site, e.g. `:8443` |
+| `serve.backend`               | yes*     | Full URL of the real upstream to reverse-proxy to |
+| `serve.acme_email`            | yes*     | Contact email for the Let's Encrypt account (expiry/account notices) |
+| `serve.dns_provider`          | yes*     | DNS-01 challenge provider — only `cloudflare` today, more planned |
+| `serve.cloudflare.api_token_env` | yes* (if `dns_provider: cloudflare`) | Name of the environment variable holding a scoped Cloudflare API Token (Zone:DNS:Edit) — must actually be set, checked at config-load time |
+
+\* only required if `serve` is set at all — a site with no `serve` block
+currently has no effect (a future release will let such a site attach to
+an `intercept_ssl` host instead, for domains you don't own).
+
+**Network topology:** this daemon terminates TLS itself with its own ACME
+certificate — it does **not** expect something else (a reverse proxy,
+load balancer, CDN) to already be doing that for `serve.domain`, since that
+would defeat the point of holding a real certificate here at all. The
+expected setup is: your own edge reverse proxy does **TCP/SNI passthrough**
+for `serve.domain` to `serve.listen_addr` on this box (port 80 is never
+needed — see "Why DNS-01" below), so the ACME-issued certificate this
+daemon presents is the one real clients actually see.
+
+**Why DNS-01, not HTTP-01:** HTTP-01 challenges require port 80 reachable
+from the public internet at issuance time, every ~60-90 days. DNS-01
+instead requires API credentials for whatever DNS provider hosts your
+domain (used to create a temporary TXT record proving ownership) but never
+needs any inbound port opened for issuance itself — a better fit for a
+homelab box that's otherwise not directly internet-facing.
+
+**Certificate/account storage:** everything ACME needs — the account
+private key it generates, plus issued certs and their keys — lives under
+an `acme-cache` folder next to `config.yaml` (i.e. under the same directory
+as `internal/mitm`'s CA private key, for the same reason: never served,
+never under `certs_dir`). Back it up along with your config to avoid
+re-issuing certificates (and burning into Let's Encrypt's rate limits)
+after a fresh install.
+
+**First boot / renewal:** a site's public listener doesn't bind until its
+certificate is actually obtained — a public listener should never accept a
+connection it can't terminate TLS for. A site that fails to get a
+certificate (bad credentials, a DNS/API hiccup, a Let's Encrypt rate
+limit) is retried automatically every few seconds (the same poll that
+picks up other config changes) and logged — it never blocks any other
+site, host, or the rest of the daemon from starting.
+
+### Addon scripts
+
+Addon scripts are [Starlark](https://github.com/bazelbuild/starlark) — a
+small, sandboxed, Python-syntax **subset** used by Bazel — not real Python,
+and not real [mitmproxy](https://mitmproxy.org) compatibility, even though
+the shape is deliberately close to a simple mitmproxy addon so one can be
+hand-ported easily:
+
+```python
+# addons/netflix/cookie.star
+def request(flow):
+    flow.request.headers["X-Injected"] = "1"
+
+def response(flow):
+    flow.response.text = flow.response.text.replace("SECRET", "REDACTED")
+    flow.response.headers["X-Modified"] = "yes"
+```
+
+- `flow.request` / `flow.response` expose `method` (request only), `url`
+  (request only — reassigning it rewrites the outbound request),
+  `status_code` (response only), `headers` (a dict — a header with one
+  value reads/writes as a plain string, one with several, e.g. repeated
+  `Set-Cookie`, as a list of strings; delete with
+  `flow.request.headers.pop("X-Foo", None)`, since Starlark has no `del`
+  statement), and `text`/`content` (string/bytes; only read the body if
+  your addon actually needs to inspect or rewrite it — untouched bodies
+  are never buffered).
+- A script needs only the hook(s) it uses — a request-only or
+  response-only script is fine.
+- **Addons must be stateless across requests.** Compiled scripts are
+  cached and their top-level values frozen for safe concurrent reuse — a
+  script that tries to keep mutable state between calls (a module-level
+  counter, say) gets a loud "cannot mutate frozen value" error instead of
+  a silent race.
+- **One broken addon never breaks a request.** A script that fails to
+  compile, or whose `request()`/`response()` call errors partway through,
+  is logged and skipped — as if it weren't configured for that request at
+  all; nothing it already mutated is applied.
+- **Large responses:** `flow.response.text`/`content` necessarily buffers
+  the whole response body in memory. Fine for API/HTML/JSON traffic; if a
+  site's backend also serves bulk media/video, check `flow.request.url`
+  (or `flow.response.headers`) inside the script and return early without
+  touching `.text`/`.content` for paths/content-types you don't actually
+  need to rewrite.
+- No filesystem, network, or `import` access is available to a script —
+  the `flow` object is the entire capability surface it gets.

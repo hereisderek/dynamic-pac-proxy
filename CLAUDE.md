@@ -39,15 +39,17 @@ packages).
 
 - **`main.go`** — flag parsing (`--config`, `--install`, `--uninstall`),
   embeds `deploy/config.yaml` (`go:embed`) and passes it down to
-  `internal/install`, wires up `proxy.Manager` + a fixed 3s config-file
-  poll (`configPollInterval`), and the HTTP mux serving
+  `internal/install`, wires up `proxy.Manager` + `edge.Manager` (sharing
+  one `addon.Runtime` between them) + a fixed 3s config-file poll
+  (`configPollInterval`) that `Reconcile()`s both, and the HTTP mux serving
   `/proxy/<name>.pac`, `/status`, and `/certs`. There is no combined
   `/proxy.pac` route — removed on purpose, see below. The `go:embed`
   directive is why `deploy/config.yaml` stays at the repo root instead of
   moving under `internal/install/`: embed patterns can't contain `..`, so
   whichever package embeds it has to be an ancestor of `deploy/` — the
   root is the only package that is.
-- **`internal/config`** — YAML schema (`FileConfig`/`HostConfig`), a custom
+- **`internal/config`** — YAML schema (`FileConfig`/`HostConfig`/
+  `SiteConfig`/`SiteServe`), a custom
   `Duration` type so YAML holds `"15s"` strings instead of raw nanoseconds,
   `EffectiveHost` (per-host overrides merged onto global defaults), and
   `ValidateConfig` (unique host names, host_port/server_port ranges,
@@ -68,7 +70,21 @@ packages).
   `HostName` or `HostIP` (`ValidateConfig` rejects both-set and
   neither-set); `HostConfig.Target()` returns whichever is set, for
   display (logs, `/status`) — see `internal/health` for where the actual
-  branch (resolve vs. skip straight to dialing) happens.
+  branch (resolve vs. skip straight to dialing) happens. `SiteConfig`
+  (`sites:`) is a named `Addons` bundle that currently only does anything
+  via `Serve *SiteServe` — a standalone public reverse-proxy mirror; see
+  `internal/edge`. `ValidateConfig` fails config load fast on a `serve`
+  site's malformed domain/listen_addr/backend/acme_email, an unsupported
+  `dns_provider`, or (deliberately, matching every other credential-shaped
+  check here) a `cloudflare.api_token_env` that names an environment
+  variable that isn't actually set — a missing secret should stop config
+  load with a clear message now, not surface 60–90 days later as a
+  silently failed certificate renewal. `serve.listen_addr`'s port is
+  checked against the same collision map as `hosts[].server_port` and
+  `listen_addr`, since both are real listeners on this same process.
+  Deliberately **not** validated here: whether `sites[].addons` script
+  files exist or compile — see `internal/addon` for why that's a runtime
+  concern instead.
 - **`internal/health`** — a **lazy, TTL-gated** reachability cache.
   `State.GetFresh()` only does a real resolve (mDNS, or none at all when
   `EffectiveHost.HostIP` is set — `checkHost()` skips straight to
@@ -125,6 +141,72 @@ packages).
     so that's always the real originating device, never Charles's or the
     target's. Under `intercept_ssl` this logs the real decrypted URL, not
     just the CONNECT `host:port`.
+- **`internal/addon`** — runs `sites[].addons` scripts against decrypted
+  requests/responses, shared by `internal/edge` today and, in a future
+  iteration, `internal/proxy`'s own intercept_ssl pipeline. Scripts are
+  Starlark (`go.starlark.net` — a pure-Go, sandboxed, Python-syntax
+  *subset*, not real Python or real mitmproxy compatibility, hence the
+  `.star` extension rather than `.py`) with a mitmproxy-flavored shape
+  (`def request(flow):`, `def response(flow):`) so a simple mitmproxy
+  addon can be hand-ported. `Runtime.RunRequest`/`RunResponse` lazily
+  compile-and-cache each script by absolute path + mtime (mirroring
+  `config.Store`'s own mtime-gated reload, but per-script and triggered by
+  traffic, not a poller), calling `globals.Freeze()` after compiling —
+  required, not just tidy: `go.starlark.net`'s `StringDict` holds mutable
+  values until frozen, and only a frozen script's cached function values
+  are safe to call concurrently, each with its own fresh `*starlark.Thread`
+  (`Thread`s themselves are never shared across goroutines). Freezing also
+  turns a script that tries to keep mutable state across requests into a
+  loud "cannot mutate frozen value" error instead of a silent race — addons
+  are expected to be stateless across requests. `thread.SetMaxExecutionSteps`
+  bounds a single hook call so a pathological script can't hang a
+  request-handling goroutine; there's otherwise no step/time limit in
+  Starlark itself. The `flow` object (`flow.go`) is a Go-backed
+  `starlark.Value` implementing `HasSetField` so `flow.request.text = "..."`
+  works with real assignment syntax; mutations build up on it and are only
+  written back to the real `*http.Request`/`*http.Response` if the whole
+  call succeeds (transactional apply) — a script that errors partway
+  through never leaves a half-mutated request/response in flight. Every
+  call is wrapped in `recover()` and a compile/runtime/panic error is
+  logged-and-skipped by the caller (fail open) — one broken addon must
+  never break a request that would otherwise have worked fine without it.
+- **`internal/edge`** — the daemon's presence at the *public* network edge:
+  one standalone HTTPS reverse-proxy server per `sites[].serve`-enabled
+  site, entirely independent of `internal/proxy`'s CONNECT/`intercept_ssl`
+  machinery (no PAC-configured device talks to this; the two packages
+  share only `internal/addon`). `Manager.Reconcile()` starts/stops/rebinds
+  one listener per site exactly like `proxy.Manager` does per host.
+  Certificates come from `github.com/caddyserver/certmagic` via DNS-01
+  only (`DisableHTTPChallenge`/`DisableTLSALPNChallenge`, so no port 80/443
+  exposure is needed for issuance itself — see `internal/edge/dns.go` for
+  the `dns_provider` → `libdns.DNSProvider` switch, currently just
+  `github.com/libdns/cloudflare`, an intentionally small string-switch
+  rather than a plugin registry so adding a second provider stays a small,
+  additive change). Each site gets its **own** `certmagic.Config` even
+  though they share one `certmagic.Cache`/`certmagic.Storage` — required,
+  not just tidy: certmagic calls its `GetConfigForCert` callback again at
+  every renewal (weeks after this process's initial in-memory state), so
+  the per-domain `certmagicSource.configs` map is what lets renewal find
+  the right DNS provider/credentials again rather than a bare Config with
+  no DNS solver configured. A site's certificate is obtained
+  (`cfg.ManageSync`, blocking, bounded by `acmeTimeout`) **before** its
+  listener binds — a public listener should never accept a connection it
+  can't terminate TLS for — inside its own goroutine per site, so one
+  site's slow/failing ACME issuance never delays any other site, the
+  webui mux, or `proxy.Manager`'s hosts from starting; a failure is
+  logged and retried on the next `Reconcile()` tick (the existing 3s
+  config-poll loop in `main.go`), not through bespoke retry machinery.
+  `Manager.certFunc` is a plain `CertFunc` function value rather than an
+  interface — same pattern as `internal/proxy.NewHostHandler`'s `caGetter`
+  parameter — specifically so `NewManagerForTesting` can inject a fake
+  (a throwaway self-signed cert) and exercise the reverse-proxy/addon
+  pipeline in tests with zero ACME/network involvement.
+  `internal/edge/reverseproxy.go`'s `httputil.ReverseProxy` runs each
+  addon's `request(flow)` hook (in order) from `Director` and each addon's
+  `response(flow)` hook (in **reverse** order, mitmproxy convention) from
+  `ModifyResponse` — which must never itself return a non-nil error, since
+  `ReverseProxy` would otherwise replace the response with a generic error
+  page, defeating the whole fail-open point.
 - **`internal/mdns`** — `ResolveA` is a from-scratch mDNS (RFC 6762)
   A-record resolver over raw multicast UDP
   (`golang.org/x/net/dns/dnsmessage`), not a shell-out to `avahi-resolve`
