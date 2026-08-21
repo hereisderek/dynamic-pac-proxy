@@ -71,13 +71,18 @@ func (s *certmagicSource) TLSConfig(ctx context.Context, serve *config.SiteServe
 		return nil, err
 	}
 
+	ca := certmagic.LetsEncryptProductionCA
+	if serve.ACMEStaging {
+		ca = certmagic.LetsEncryptStagingCA
+	}
+
 	// certmagic's own documented pattern: build the Config first, then
 	// NewACMEIssuer(cfg, ...) (which stores a reference back to cfg for
 	// its own storage access during challenges), then assign the issuer
 	// onto cfg.Issuers — not the other way around.
 	cfg := certmagic.New(s.cache, certmagic.Config{Storage: s.storage})
 	issuer := certmagic.NewACMEIssuer(cfg, certmagic.ACMEIssuer{
-		CA:                      certmagic.LetsEncryptProductionCA,
+		CA:                      ca,
 		Email:                   serve.ACMEEmail,
 		Agreed:                  true,
 		DisableHTTPChallenge:    true, // DNS-01 only — no port 80 needed for issuance

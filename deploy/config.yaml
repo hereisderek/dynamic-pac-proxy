@@ -70,8 +70,9 @@ hosts:
 # request/response content in transit. See the "Sites: public reverse-proxy
 # mirrors" section of README.md — this is unrelated to intercept_ssl above,
 # which only works for domains you *don't* own. Requires CLOUDFLARE_API_TOKEN
-# (or whatever env var api_token_env names) to actually be set, or the
-# config fails to load.
+# (or whatever env var api_token_env names, or a literal cloudflare.api_token)
+# to actually be set, or the config fails to load. Renewal is fully
+# automatic once a certificate is issued — no config change needed.
 # sites:
 #   - name: netflix
 #     addons:
@@ -84,3 +85,5 @@ hosts:
 #       dns_provider: cloudflare
 #       cloudflare:
 #         api_token_env: "CLOUDFLARE_API_TOKEN"
+#         # api_token: "..."       # or a literal token instead of api_token_env
+#       # acme_staging: true       # optional: use Let's Encrypt's staging directory

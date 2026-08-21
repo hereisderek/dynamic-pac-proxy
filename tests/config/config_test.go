@@ -191,6 +191,30 @@ func TestValidateConfigSites(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "cloudflare literal api_token is accepted in place of api_token_env",
+			mutate: func(s config.SiteConfig) config.SiteConfig {
+				s.Serve.Cloudflare = &config.CloudflareDNSConfig{APIToken: "a-real-token"}
+				return s
+			},
+			wantErr: false,
+		},
+		{
+			name: "cloudflare api_token and api_token_env are mutually exclusive",
+			mutate: func(s config.SiteConfig) config.SiteConfig {
+				s.Serve.Cloudflare.APIToken = "a-real-token"
+				return s
+			},
+			wantErr: true,
+		},
+		{
+			name: "acme_staging is accepted",
+			mutate: func(s config.SiteConfig) config.SiteConfig {
+				s.Serve.ACMEStaging = true
+				return s
+			},
+			wantErr: false,
+		},
 	}
 
 	for _, tc := range cases {

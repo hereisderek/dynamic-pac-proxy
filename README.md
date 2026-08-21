@@ -541,6 +541,8 @@ sites:
       dns_provider: cloudflare
       cloudflare:
         api_token_env: "CLOUDFLARE_API_TOKEN"   # names an env var — never put the token itself here
+        # api_token: "..."   # or a literal token instead — see the field table below
+      # acme_staging: true   # optional — use Let's Encrypt's staging directory instead of production
 ```
 
 Each entry in `sites`:
@@ -554,7 +556,11 @@ Each entry in `sites`:
 | `serve.backend`               | yes*     | Full URL of the real upstream to reverse-proxy to |
 | `serve.acme_email`            | yes*     | Contact email for the Let's Encrypt account (expiry/account notices) |
 | `serve.dns_provider`          | yes*     | DNS-01 challenge provider — only `cloudflare` today, more planned |
-| `serve.cloudflare.api_token_env` | yes* (if `dns_provider: cloudflare`) | Name of the environment variable holding a scoped Cloudflare API Token (Zone:DNS:Edit) — must actually be set, checked at config-load time |
+| `serve.cloudflare.api_token_env` | yes*† | Name of the environment variable holding a scoped Cloudflare API Token (Zone:DNS:Edit) — must actually be set, checked at config-load time |
+| `serve.cloudflare.api_token`  | yes*†    | The Cloudflare API Token itself, given literally instead of via an env var. Mutually exclusive with `api_token_env` — treat a config file using this like you would a file holding the token in plaintext, because it is one |
+| `serve.acme_staging`          | no       | `true` routes issuance/renewal through Let's Encrypt's **staging** directory — much higher rate limits, but the issued cert isn't trusted by real clients. For exercising the DNS-01 pipeline itself without burning production's rate limits; never leave this on for a site real clients depend on |
+
+† if `dns_provider: cloudflare`, exactly one of `serve.cloudflare.api_token` / `api_token_env` is required.
 
 \* only required if `serve` is set at all — a site with no `serve` block
 currently has no effect (a future release will let such a site attach to
@@ -590,7 +596,11 @@ connection it can't terminate TLS for. A site that fails to get a
 certificate (bad credentials, a DNS/API hiccup, a Let's Encrypt rate
 limit) is retried automatically every few seconds (the same poll that
 picks up other config changes) and logged — it never blocks any other
-site, host, or the rest of the daemon from starting.
+site, host, or the rest of the daemon from starting. Renewal itself is
+also fully automatic once issued: certmagic runs a background maintenance
+loop for as long as this process is up, renewing each site's certificate
+well before it expires — nothing in `config.yaml` needs to change or
+reload to trigger it.
 
 ### Addon scripts
 

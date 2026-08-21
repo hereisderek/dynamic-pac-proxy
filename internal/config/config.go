@@ -147,17 +147,30 @@ type SiteServe struct {
 	// of building a generic plugin system nobody's asked for yet.
 	DNSProvider string               `yaml:"dns_provider"`
 	Cloudflare  *CloudflareDNSConfig `yaml:"cloudflare,omitempty"`
+
+	// ACMEStaging routes issuance/renewal through Let's Encrypt's staging
+	// directory (much higher rate limits, certs not trusted by real
+	// clients) instead of production — for exercising the DNS-01/renewal
+	// pipeline itself without burning production's much stricter rate
+	// limits. Never leave this on for a site real clients depend on.
+	ACMEStaging bool `yaml:"acme_staging,omitempty"`
 }
 
-// CloudflareDNSConfig names the environment variable holding a scoped
-// Cloudflare API Token (Zone:DNS:Edit) — never the token itself, since
-// config.yaml is hot-reloaded and has no precedent anywhere in this repo
-// for holding a secret (unlike, say, internal/mitm's CA key, which is
+// CloudflareDNSConfig authenticates DNS-01 challenges against Cloudflare,
+// via either a scoped API Token (Zone:DNS:Edit) given directly (APIToken)
+// or the name of an environment variable holding one (APITokenEnv) — never
+// both. APITokenEnv is the preferred form, since config.yaml is
+// hot-reloaded and has no other precedent in this repo for holding a
+// secret at rest (unlike, say, internal/mitm's CA key, which is
 // deliberately kept out of anything served but still lives on disk next
-// to config.yaml — a credential is worse to leave sitting in a config
-// file that already gets read/logged/reloaded routinely).
+// to config.yaml — a credential is worse to leave sitting in a config file
+// that already gets read/logged/reloaded routinely). APIToken exists for
+// setups where an env var isn't practical to wire up; treat a config.yaml
+// using it as sensitive as a file holding the token in plaintext, because
+// it is one.
 type CloudflareDNSConfig struct {
-	APITokenEnv string `yaml:"api_token_env"`
+	APIToken    string `yaml:"api_token,omitempty"`
+	APITokenEnv string `yaml:"api_token_env,omitempty"`
 }
 
 type FileConfig struct {
@@ -384,10 +397,13 @@ func ValidateConfig(cfg FileConfig) error {
 
 		switch serve.DNSProvider {
 		case "cloudflare":
-			if serve.Cloudflare == nil || serve.Cloudflare.APITokenEnv == "" {
-				return fmt.Errorf("sites[%d] (%s): serve.cloudflare.api_token_env is required when dns_provider is \"cloudflare\"", i, s.Name)
+			if serve.Cloudflare == nil || (serve.Cloudflare.APIToken == "" && serve.Cloudflare.APITokenEnv == "") {
+				return fmt.Errorf("sites[%d] (%s): serve.cloudflare requires either api_token or api_token_env when dns_provider is \"cloudflare\"", i, s.Name)
 			}
-			if os.Getenv(serve.Cloudflare.APITokenEnv) == "" {
+			if serve.Cloudflare.APIToken != "" && serve.Cloudflare.APITokenEnv != "" {
+				return fmt.Errorf("sites[%d] (%s): serve.cloudflare.api_token and api_token_env are mutually exclusive — set only one", i, s.Name)
+			}
+			if serve.Cloudflare.APITokenEnv != "" && os.Getenv(serve.Cloudflare.APITokenEnv) == "" {
 				return fmt.Errorf("sites[%d] (%s): environment variable %q (serve.cloudflare.api_token_env) is not set", i, s.Name, serve.Cloudflare.APITokenEnv)
 			}
 		case "":

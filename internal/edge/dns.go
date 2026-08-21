@@ -19,7 +19,10 @@ import (
 func buildDNSProvider(serve *config.SiteServe) (certmagic.DNSProvider, error) {
 	switch serve.DNSProvider {
 	case "cloudflare":
-		token := os.Getenv(serve.Cloudflare.APITokenEnv)
+		token := serve.Cloudflare.APIToken
+		if token == "" {
+			token = os.Getenv(serve.Cloudflare.APITokenEnv)
+		}
 		if token == "" {
 			// config.ValidateConfig already checks this at load time; this
 			// is a defensive backstop in case the env var was unset again

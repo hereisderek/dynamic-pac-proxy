@@ -79,12 +79,19 @@ packages).
   check here) a `cloudflare.api_token_env` that names an environment
   variable that isn't actually set — a missing secret should stop config
   load with a clear message now, not surface 60–90 days later as a
-  silently failed certificate renewal. `serve.listen_addr`'s port is
-  checked against the same collision map as `hosts[].server_port` and
-  `listen_addr`, since both are real listeners on this same process.
-  Deliberately **not** validated here: whether `sites[].addons` script
-  files exist or compile — see `internal/addon` for why that's a runtime
-  concern instead.
+  silently failed certificate renewal. `CloudflareDNSConfig` accepts
+  either `api_token_env` (preferred) or a literal `api_token` — exactly
+  one, never both, enforced by `ValidateConfig`; `internal/edge`'s
+  `buildDNSProvider` prefers the literal when both would somehow be
+  present. `SiteServe.ACMEStaging` (`acme_staging` in YAML) is a plain
+  bool with no validation of its own — routing issuance through Let's
+  Encrypt's staging directory instead of production, for exercising the
+  DNS-01/renewal pipeline without burning production's much stricter rate
+  limits. `serve.listen_addr`'s port is checked against the same
+  collision map as `hosts[].server_port` and `listen_addr`, since both
+  are real listeners on this same process. Deliberately **not** validated
+  here: whether `sites[].addons` script files exist or compile — see
+  `internal/addon` for why that's a runtime concern instead.
 - **`internal/health`** — a **lazy, TTL-gated** reachability cache.
   `State.GetFresh()` only does a real resolve (mDNS, or none at all when
   `EffectiveHost.HostIP` is set — `checkHost()` skips straight to
@@ -188,7 +195,17 @@ packages).
   every renewal (weeks after this process's initial in-memory state), so
   the per-domain `certmagicSource.configs` map is what lets renewal find
   the right DNS provider/credentials again rather than a bare Config with
-  no DNS solver configured. A site's certificate is obtained
+  no DNS solver configured. Renewal itself needs no code of its own: every
+  `certmagic.Cache` runs its own background maintenance goroutine
+  (`maintainAssets`, started once inside `certmagic.NewCache`) for the
+  life of the process, periodically renewing anything in the cache marked
+  `managed` — which `cfg.ManageSync` already does — well before expiry;
+  `certmagicSource` doesn't need its own renewal loop or timer.
+  `SiteServe.ACMEStaging` swaps `certmagic.ACMEIssuer.CA` from
+  `LetsEncryptProductionCA` to `LetsEncryptStagingCA`, nothing else — same
+  DNS-01 solver, same renewal path, just pointed at Let's Encrypt's
+  much-higher-rate-limit, not-publicly-trusted directory. A site's
+  certificate is obtained
   (`cfg.ManageSync`, blocking, bounded by `acmeTimeout`) **before** its
   listener binds — a public listener should never accept a connection it
   can't terminate TLS for — inside its own goroutine per site, so one
