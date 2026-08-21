@@ -177,6 +177,25 @@ packages).
   call is wrapped in `recover()` and a compile/runtime/panic error is
   logged-and-skipped by the caller (fail open) — one broken addon must
   never break a request that would otherwise have worked fine without it.
+  `http.go`'s `http_request(url, method="GET", headers=None, body=None)`
+  is the one deliberate hole in the sandbox — real outbound HTTP, e.g. to
+  fetch a session cookie from an auth endpoint before rewriting a request
+  — registered as a predeclared builtin (`addonPredeclared`) passed into
+  `starlark.ExecFile` alongside the script's own top level. It returns a
+  `*responseValue` (the same type `flow.response` is) built by reading the
+  whole body eagerly and closing the real connection immediately, rather
+  than `responseValue`'s usual lazy `loadBody` — nothing else is ever going
+  to touch this one to read/close it the way the reverse-proxy pipeline
+  does for the real `flow.response`, so leaving it lazy would leak the
+  connection on any script that never touches `.text`/`.content`. A fixed
+  `httpRequestTimeout` (10s) on the shared `httpClient` is what actually
+  bounds a call's wall-clock time — `thread.SetMaxExecutionSteps` only
+  counts interpreted Starlark steps, so it does nothing to stop a slow
+  remote server from hanging the calling goroutine. Deliberately no further
+  sandboxing (no URL allowlist, no private-IP/SSRF blocking): the operator
+  writing an addon already has full control over this daemon's config and
+  host, so this sandbox exists to contain a *buggy* script, not to defend
+  against an *adversarial* one written by its own author.
 - **`internal/edge`** — the daemon's presence at the *public* network edge:
   one standalone HTTPS reverse-proxy server per `sites[].serve`-enabled
   site, entirely independent of `internal/proxy`'s CONNECT/`intercept_ssl`

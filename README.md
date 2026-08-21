@@ -646,5 +646,16 @@ def response(flow):
   (or `flow.response.headers`) inside the script and return early without
   touching `.text`/`.content` for paths/content-types you don't actually
   need to rewrite.
-- No filesystem, network, or `import` access is available to a script —
-  the `flow` object is the entire capability surface it gets.
+- No filesystem or `import` access is available to a script. The one
+  exception to "no ambient access" is outbound HTTP:
+  `http_request(url, method="GET", headers=None, body=None)` — for cases
+  like fetching a session cookie from an auth endpoint before rewriting a
+  request. It returns an object with the same
+  `status_code`/`headers`/`text`/`content` shape as `flow.response`
+  (mutating it does nothing, though — it isn't wired back to anything).
+  Bounded by a fixed 10s timeout per call; a network error fails the whole
+  hook call the same as any other Starlark error (logged and skipped, fail
+  open). This is deliberately not sandboxed further (no URL allowlist, no
+  private-IP blocking) — the operator writing an addon already has full
+  control over this daemon's config and host, so restricting what their
+  own script can reach protects against nothing.

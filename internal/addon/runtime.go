@@ -9,8 +9,14 @@
 // `flow.request`/`flow.response` objects) so a simple mitmproxy addon can
 // be hand-ported — but this is Starlark (a Python-syntax subset, sandboxed,
 // pure Go), not real Python or real mitmproxy compatibility: no imports,
-// no classes, no filesystem/network access from a script, and no shared
-// mutable state across requests (see compile/Freeze below).
+// no classes, no filesystem access, and no shared mutable state across
+// requests (see compile/Freeze below). The one deliberate hole in the
+// sandbox is outbound HTTP: http_request() (see http.go) lets a script do
+// real work — e.g. fetch a session cookie from an auth endpoint before
+// rewriting a request — since the operator who writes an addon already has
+// full control over this daemon's config and host, so sandboxing network
+// access from them buys nothing; the sandbox here guards against a script
+// that's buggy, not one that's adversarial toward its own author.
 package addon
 
 import (
@@ -123,7 +129,7 @@ func compileScript(absPath string) *compiledScript {
 	thread := &starlark.Thread{Name: "addon-compile:" + absPath}
 	thread.SetMaxExecutionSteps(maxExecutionSteps)
 
-	globals, err := starlark.ExecFile(thread, absPath, nil, nil)
+	globals, err := starlark.ExecFile(thread, absPath, nil, addonPredeclared)
 	if err != nil {
 		return &compiledScript{err: fmt.Errorf("addon %s: compile: %w", absPath, err)}
 	}

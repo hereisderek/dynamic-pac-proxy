@@ -204,6 +204,85 @@ def request(flow):
 	}
 }
 
+func TestHTTPRequestGetFetchesCookie(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-From-Script"); got != "yes" {
+			t.Errorf("backend saw X-From-Script = %q, want \"yes\"", got)
+		}
+		http.SetCookie(w, &http.Cookie{Name: "session", Value: "abc123"})
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer backend.Close()
+
+	dir := t.TempDir()
+	writeScript(t, dir, "fetch.star", fmt.Sprintf(`
+def request(flow):
+    resp = http_request(%q, headers={"X-From-Script": "yes"})
+    if resp.status_code != 200:
+        fail("unexpected status: " + str(resp.status_code))
+    flow.request.headers["X-Fetched-Cookie"] = resp.headers["Set-Cookie"]
+    flow.request.headers["X-Fetched-Body"] = resp.text
+`, backend.URL))
+
+	rt := addon.NewRuntime()
+	req := newReq("GET", "http://example.com/", "")
+	if err := rt.RunRequest(dir, "fetch.star", req); err != nil {
+		t.Fatalf("RunRequest: %v", err)
+	}
+	if got := req.Header.Get("X-Fetched-Cookie"); got != "session=abc123" {
+		t.Fatalf("X-Fetched-Cookie = %q", got)
+	}
+	if got := req.Header.Get("X-Fetched-Body"); got != "ok" {
+		t.Fatalf("X-Fetched-Body = %q", got)
+	}
+}
+
+func TestHTTPRequestPostWithBody(t *testing.T) {
+	backend := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Errorf("backend saw method %q, want POST", r.Method)
+		}
+		body, _ := io.ReadAll(r.Body)
+		w.WriteHeader(http.StatusCreated)
+		_, _ = w.Write(body)
+	}))
+	defer backend.Close()
+
+	dir := t.TempDir()
+	writeScript(t, dir, "post.star", fmt.Sprintf(`
+def request(flow):
+    resp = http_request(%q, method="POST", body="hello")
+    flow.request.headers["X-Echo-Status"] = str(resp.status_code)
+    flow.request.headers["X-Echo-Body"] = resp.text
+`, backend.URL))
+
+	rt := addon.NewRuntime()
+	req := newReq("GET", "http://example.com/", "")
+	if err := rt.RunRequest(dir, "post.star", req); err != nil {
+		t.Fatalf("RunRequest: %v", err)
+	}
+	if got := req.Header.Get("X-Echo-Status"); got != "201" {
+		t.Fatalf("X-Echo-Status = %q", got)
+	}
+	if got := req.Header.Get("X-Echo-Body"); got != "hello" {
+		t.Fatalf("X-Echo-Body = %q", got)
+	}
+}
+
+func TestHTTPRequestNetworkErrorFailsTheHook(t *testing.T) {
+	dir := t.TempDir()
+	writeScript(t, dir, "badhost.star", `
+def request(flow):
+    http_request("http://127.0.0.1:1/definitely-not-listening")
+`)
+	rt := addon.NewRuntime()
+	req := newReq("GET", "http://example.com/", "")
+	if err := rt.RunRequest(dir, "badhost.star", req); err == nil {
+		t.Fatal("expected a network error from an unreachable host")
+	}
+}
+
 func TestRunRequestConcurrent(t *testing.T) {
 	dir := t.TempDir()
 	writeScript(t, dir, "concurrent.star", `
